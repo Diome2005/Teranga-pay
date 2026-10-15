@@ -1,0 +1,14 @@
+# [FICHIER] : .gitignore — exclusions Git du projet Teranga Pay
+# [RÔLE] : empêcher le versionnement des dépendances, des builds et des secrets.
+
+# Dépendances
+node_modules/
+
+# Build / artefacts
+dist/
+
+# Variables d'environnement (secrets Bitnob)
+.env
+
+# Logs
+*.log

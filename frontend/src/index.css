@@ -1,0 +1,6 @@
+/* [FICHIER] : frontend/src/index.css */
+/* [RÔLE] : feuille de style globale de l'application. */
+/* [À FAIRE PAR L'ÉQUIPE] : */
+/* - Ajouter les directives Tailwind : @tailwind base; @tailwind components; @tailwind utilities; */
+/* - (optionnel) styles de base du body */
+/* [FLUX] : importée par main.jsx, elle porte le style Tailwind de tout le site. */
