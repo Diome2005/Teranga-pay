@@ -3,9 +3,9 @@
 PSP marchand pour la diaspora sénégalaise : le client règle en **Bitcoin Lightning**, le
 marchand reçoit en **FCFA** sur son compte **Mobile Money** (Wave / Orange Money / Free Money).
 
-> Note de travail : la page d'accueil (Landing Page) est développée sur la branche
-> **`feat/landing-page`**. Elle n'est **pas encore fusionnée dans `main`** — travail en cours,
-> conservé à part pour le moment.
+> Statut : l'ensemble du travail (backend + frontend + landing page) est **fusionné dans `main`**
+> et fonctionnel en **mode démo** (`DEMO_MODE=true`). La mise en production reste conditionnée à
+> la confirmation des points Bitnob listés dans [À faire par l'équipe](#à-faire-par-léquipe).
 
 ---
 
@@ -276,12 +276,27 @@ fonctionnel (aucun crash si le prestataire est absent).
 
 ## À faire par l'équipe
 
-- ~~Backend : serveur Express, routes `invoices` / `webhooks`, service `bitnob.js`~~ ✅ **fait**
+- ~~Backend : serveur Express, routes `invoices` / `webhooks`, service `bitnobService.js`~~ ✅ **fait**
 - ~~Persistance (registres factures/OTP/sessions persistants)~~ ✅ **fait** (JSON fichier, `services/store.js`)
 - ~~Auth passwordless (OTP)~~ ✅ **fait** (`services/auth.js`) + envoi SMS/WhatsApp réel (`services/sms.js`)
 - ~~Paiement carte (Stripe Checkout + webhook)~~ ✅ **fait** (`services/stripe.js`) — renseigner `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
 - ~~Frontend : brancher `CheckoutPage` / `MerchantDashboard` sur les routes OTP et carte~~ ✅ **fait** (helpers `services/api.js`, y compris `PUT /merchants/me`)
 - ~~Flux de bout en bout : lien marchand → paiement Lightning / carte → webhook → payout FCFA~~ ✅ **fait** (`npm run demo`)
 - ~~Scénario de démonstration de bout en bout pour le jury~~ ✅ **fait** (`scripts/demo-e2e.js`)
+- ~~Fusion dans `main` (backend + frontend + landing page)~~ ✅ **fait**
+
+### À confirmer avant mise en production (bloquant)
+
+- **Bitnob — signature HMAC sortante** : confirmer la chaîne signée (`CLIENT_ID:TIMESTAMP:NONCE:PAYLOAD`),
+  les noms d'en-têtes et le format (hex/base64) d'après la doc officielle.
+- **Bitnob — chemins des endpoints** : confirmer le préfixe versionné et les routes exactes
+  (invoices, quotes, initialize, finalize, banks) ainsi que les valeurs de `network` Mobile Money.
+- **Bitnob — webhook entrant** : trancher SHA512 vs SHA256 et `WEBHOOK_SECRET` vs `CLIENT_SECRET`
+  (aujourd'hui `verifyWebhookSignature` teste toutes les combinaisons — temporaire).
+
+### Améliorations optionnelles
+
+- Garde-fou production : refuser `DEMO_MODE=true` si `NODE_ENV=production`.
+- Exposer les webhooks via ngrok (`PUBLIC_URL` / `callback_url`) pour les tests réels.
 - Remplacer le store JSON par une vraie base (Postgres/SQLite) si besoin — même API Map-like.
 - Variables d'environnement : voir `backend/.env.example` et `frontend/.env.example`.
