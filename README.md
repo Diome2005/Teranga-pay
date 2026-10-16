@@ -9,6 +9,105 @@ marchand reçoit en **FCFA** sur son compte **Mobile Money** (Wave / Orange Mone
 
 ---
 
+## Description du projet
+
+Teranga Pay est une passerelle de paiement (Payment Service Provider) pensée pour les
+**marchands sénégalais** qui vendent à la **diaspora**. Le problème résolu : envoyer de
+l'argent au Sénégal coûte cher et prend du temps. Teranga Pay inverse le rail : le client
+paie en **Bitcoin Lightning** depuis n'importe où dans le monde (quelques secondes, frais
+minimes), et le marchand est réglé en **FCFA** directement sur son **compte Mobile Money**,
+sans jamais manipuler de crypto.
+
+Le projet se compose de deux applications :
+
+- un **backend** Node.js/Express qui expose l'API (création de liens de paiement, statut,
+  webhooks, authentification marchand) et orchestre la passerelle **Bitnob** (factures
+  Lightning + payouts Mobile Money) ;
+- un **frontend** React/Vite avec trois parcours : page d'accueil publique, **dashboard
+  marchand** (connexion passwordless par OTP, création/partage de liens) et **page de
+  paiement client** (QR Lightning + paiement par carte).
+
+### Comment ça marche
+
+1. Le **marchand** se connecte (OTP sur son numéro Mobile Money) et crée un **lien de paiement**
+   pour un montant en FCFA.
+2. Le client ouvre le lien et scanne une **facture Lightning** (BOLT11 + QR), ou règle par
+   **carte bancaire** (Stripe Checkout).
+3. Bitnob confirme le paiement via **webhook** ; la facture passe en *payée*.
+4. Teranga Pay **liquide** automatiquement le montant en FCFA vers le Mobile Money du
+   marchand (Wave / Orange Money / Free Money). Le dénouement du payout est aussi remonté
+   par webhook.
+
+Le montant FCFA demandé au client est converti en satoshis (taux configurable, XOF/BTC).
+
+### Fonctionnalités clés
+
+- Création / listing / consultation de liens de paiement (factures Lightning BOLT11 + QR).
+- Paiement client en Lightning **ou** par carte (Stripe Checkout + Apple Pay).
+- Webhooks Bitnob (paiement confirmé, cycle de vie des payouts) et Stripe (carte), signés.
+- Liquidation automatique en FCFA vers Wave / Orange Money / Free Money (payouts Bitnob).
+- Authentification marchand **passwordless** (OTP SMS / WhatsApp + sessions).
+- Persistance fichier (registres JSON) et **mode démo** (`DEMO_MODE=true`) pour tester sans
+  aucune clé réelle.
+
+---
+
+## Prérequis
+
+- **Node.js 18+** (utilise `fetch` global et le test runner natif `node --test`).
+- **npm** (fourni avec Node.js).
+- *(optionnel)* Compte **Bitnob** (sandbox) et **Stripe** pour les paiements réels.
+- *(optionnel)* **ngrok** pour exposer les webhooks en local.
+
+---
+
+## Installation & lancement
+
+Le projet contient **deux applications** (`backend/` et `frontend/`) : installer et lancer
+chacune dans un terminal séparé.
+
+### 1. Backend (API — port 5000)
+
+```bash
+cd backend
+npm install               # installe Express, Axios, Dotenv…
+copy .env.example .env     # Windows (ou : cp .env.example .env)
+npm run dev               # démarre l'API sur http://localhost:5000
+```
+
+Par défaut `DEMO_MODE=true` : les paiements et liquidations sont **simulés**, aucune clé
+Bitnob/Stripe n'est nécessaire pour tester le parcours.
+
+### 2. Frontend (interface — port 5173)
+
+```bash
+cd frontend
+npm install               # installe React, Vite, Tailwind, qrcode.react…
+copy .env.example .env     # Windows (ou : cp .env.example .env)
+npm run dev               # démarre l'interface sur http://localhost:5173
+```
+
+Le serveur Vite **proxifie `/api` vers le backend** (`:5000`), donc en local il suffit de
+laisser `VITE_API_URL` vide.
+
+### 3. Utilisation
+
+- Ouvrir **http://localhost:5173** → page d'accueil.
+- « Accéder au Dashboard » → connexion marchand par OTP (en mode démo, le code est affiché).
+- Créer un lien de paiement, puis ouvrir le guichet client (`/?pay=<id>`).
+
+### Commandes utiles
+
+| Dossier | Commande | Rôle |
+|---|---|---|
+| `backend` | `npm run dev` | API en rechargement auto (http://localhost:5000) |
+| `backend` | `npm test` | tests e2e (santé, OTP, webhooks, payouts, Stripe) |
+| `backend` | `npm run demo` | scénario de démonstration bout-en-bout |
+| `frontend` | `npm run dev` | interface Vite (http://localhost:5173) |
+| `frontend` | `npm run build` | build de production |
+
+---
+
 ## Stack technique
 
 - **Frontend** : React 18 + Vite + Tailwind CSS + `qrcode.react`
@@ -106,14 +205,6 @@ principaux appellent `onEnterDashboard` pour basculer vers `MerchantDashboard`.
 - Animations CSS définies dans `src/index.css` : `fadeIn`, `drift` (fond), `floatSlow` (orbes).
 - Cartes/aperçus avec effets `hover`/`active` (scale, tilt 3D, halo émeraude).
 
-### Lancer le frontend
-
-```bash
-cd frontend
-npm install
-npm run dev      # http://localhost:5173
-```
-
 ---
 
 ## Endpoints backend
@@ -136,13 +227,11 @@ npm run dev      # http://localhost:5173
 | POST | `/api/invoices/:id/card` | crée une session Stripe Checkout (carte / Apple Pay) |
 | POST | `/api/webhooks/stripe` | webhook Stripe signé → facture payée |
 
-Lancer + tester le backend :
+Lancer + tester le backend (voir aussi [Installation & lancement](#installation--lancement)) :
 
 ```bash
 cd backend
-npm install
 npm test        # tests e2e (santé, OTP, webhooks signés, payouts, Stripe)
-npm run dev     # http://localhost:5000
 npm run demo    # scénario de démonstration bout-en-bout (jury)
 ```
 
