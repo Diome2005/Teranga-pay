@@ -41,4 +41,41 @@ export async function simulateCardPayment(id) {
   return data;
 }
 
+// --- Étape 6 : auth passwordless (OTP) ---
+
+// Demande un code OTP pour un numéro Mobile Money
+export async function requestOtp(payload) {
+  const { data } = await api.post("/auth/otp", payload);
+  return data;
+}
+
+// Vérifie le code OTP et renvoie une session (jeton)
+export async function verifyOtp(payload) {
+  const { data } = await api.post("/auth/otp/verify", payload);
+  return data;
+}
+
+// --- Étape 6 : profil marchand (protégé par jeton) ---
+
+function authHeaders(token) {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export async function getMerchant(token) {
+  const { data } = await api.get("/merchants/me", { headers: authHeaders(token) });
+  return data;
+}
+
+export async function updateMerchant(token, payload) {
+  const { data } = await api.put("/merchants/me", payload, { headers: authHeaders(token) });
+  return data;
+}
+
+// --- Étape 6 : paiement par carte (Stripe Checkout) ---
+// Renvoie { checkoutUrl } pour rediriger le client ; 503 si Stripe non configuré.
+export async function createCardPayment(id, payload) {
+  const { data } = await api.post(`/invoices/${id}/card`, payload || {});
+  return data;
+}
+
 export default api;

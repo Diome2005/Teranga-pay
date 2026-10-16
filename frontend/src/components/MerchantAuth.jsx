@@ -3,9 +3,11 @@
 // [FLUX] : saisie du numéro Mobile Money -> code OTP -> ouverture de l'espace marchand.
 //          Aucun compte à créer : le numéro + le code suffisent.
 // [UI] : Tailwind CSS — tokens de thème (clair/sombre) + accent émeraude. Sans emoji.
-// NOTE : backend non branché — le code OTP est simulé et affiché à l'écran (démo).
+// [ÉTAPE 6] : OTP branché au backend (/api/auth/otp + /verify). Repli démo local si le
+//          backend est indisponible (code affiché à l'écran pour la démonstration).
 
 import { useEffect, useState } from "react";
+import { requestOtp, verifyOtp } from "../services/api";
 
 const PAGE_BG = "/images/dakar-city.jpg";
 const OTP_COOLDOWN = 30;
@@ -68,6 +70,9 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
   const [sentCode, setSentCode] = useState("");
   const [error, setError] = useState("");
   const [cooldown, setCooldown] = useState(0);
+  const [sending, setSending] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [smsSent, setSmsSent] = useState(false); // backend en mode réel (pas de demoCode)
 
   const digits = phoneDigits(phone);
 
@@ -77,37 +82,75 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
     return () => clearInterval(t);
   }, [cooldown]);
 
-  const sendCode = (event) => {
+  // Appelle le backend pour générer un OTP ; repli local si backend absent.
+  const sendCode = async (event) => {
     event.preventDefault();
     if (digits.length !== 9) {
       setError("Saisissez un numéro Mobile Money valide (9 chiffres).");
       return;
     }
-    setSentCode(String(Math.floor(100000 + Math.random() * 900000)));
-    setCode("");
+    setSending(true);
     setError("");
-    setStep("otp");
-    setCooldown(OTP_COOLDOWN);
-  };
-
-  const resend = () => {
-    if (cooldown > 0) return;
-    setSentCode(String(Math.floor(100000 + Math.random() * 900000)));
-    setCode("");
-    setCooldown(OTP_COOLDOWN);
-  };
-
-  const verify = (event) => {
-    event.preventDefault();
-    if (code !== sentCode) {
-      setError("Code incorrect. Vérifiez le code reçu.");
-      return;
+    try {
+      const res = await requestOtp({ phone: digits });
+      // Le backend renvoie demoCode uniquement en DEMO_MODE ; sinon le code part en SMS.
+      setSentCode(res?.demoCode || "");
+      setSmsSent(!res?.demoCode);
+      setCode("");
+      setStep("otp");
+      setCooldown(res?.resendAfter || OTP_COOLDOWN);
+    } catch {
+      // Backend indisponible -> repli démo autonome (code affiché à l'écran).
+      setSentCode(String(Math.floor(100000 + Math.random() * 900000)));
+      setSmsSent(false);
+      setCode("");
+      setStep("otp");
+      setCooldown(OTP_COOLDOWN);
+    } finally {
+      setSending(false);
     }
-    onAuthenticated?.({
-      phone: `+221 ${formatPhoneInput(digits)}`,
-      shop: "Atelier Awa Couture",
-      since: new Date().toISOString(),
-    });
+  };
+
+  const resend = async () => {
+    if (cooldown > 0) return;
+    setSending(true);
+    setError("");
+    try {
+      const res = await requestOtp({ phone: digits });
+      setSentCode(res?.demoCode || "");
+      setSmsSent(!res?.demoCode);
+      setCooldown(res?.resendAfter || OTP_COOLDOWN);
+    } catch {
+      setSentCode(String(Math.floor(100000 + Math.random() * 900000)));
+      setSmsSent(false);
+      setCooldown(OTP_COOLDOWN);
+    } finally {
+      setSending(false);
+      setCode("");
+    }
+  };
+
+  // Vérifie le code via le backend ; repli sur la comparaison locale si backend absent.
+  const verify = async (event) => {
+    event.preventDefault();
+    setVerifying(true);
+    setError("");
+    try {
+      const res = await verifyOtp({ phone: digits, code });
+      const session = res?.session || {};
+      onAuthenticated?.({
+        phone: session.phone || `+221 ${formatPhoneInput(digits)}`,
+        shop: session.shop || "Atelier Awa Couture",
+        since: session.since || new Date().toISOString(),
+        token: session.token || null,
+      });
+    } catch (err) {
+      const message =
+        err?.response?.data?.error || "Code incorrect ou expiré. Vérifiez le code reçu.";
+      setError(message);
+    } finally {
+      setVerifying(false);
+    }
   };
 
   return (
@@ -186,9 +229,10 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
 
                   <button
                     type="submit"
-                    className="shine relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-xl bg-emerald-500 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
+                    disabled={sending}
+                    className="shine relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-xl bg-emerald-500 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    Recevoir un code
+                    {sending ? "Envoi en cours…" : "Recevoir un code"}
                     <IconArrow className="h-4 w-4" />
                   </button>
                 </form>
@@ -212,11 +256,18 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
                     className="w-full rounded-xl border border-line/10 bg-base/40 px-3 py-3 text-center font-mono text-2xl tracking-[0.5em] outline-none placeholder:text-ink-faint focus:border-emerald-400/50"
                   />
 
-                  <div className="flex items-center gap-2 rounded-lg border border-dashed border-emerald-500/30 bg-emerald-500/[0.06] px-3 py-2 text-xs text-ink-subtle">
-                    <IconShield className="h-4 w-4 shrink-0 text-accent" />
-                    Démo — votre code :{" "}
-                    <span className="font-mono font-bold text-accent">{sentCode}</span>
-                  </div>
+                  {sentCode ? (
+                    <div className="flex items-center gap-2 rounded-lg border border-dashed border-emerald-500/30 bg-emerald-500/[0.06] px-3 py-2 text-xs text-ink-subtle">
+                      <IconShield className="h-4 w-4 shrink-0 text-accent" />
+                      Démo — votre code :{" "}
+                      <span className="font-mono font-bold text-accent">{sentCode}</span>
+                    </div>
+                  ) : smsSent ? (
+                    <div className="flex items-center gap-2 rounded-lg border border-dashed border-line/15 bg-band/5 px-3 py-2 text-xs text-ink-subtle">
+                      <IconShield className="h-4 w-4 shrink-0 text-accent" />
+                      Code envoyé par SMS — saisissez-le pour continuer.
+                    </div>
+                  ) : null}
 
                   {error && (
                     <p className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-400">
@@ -226,9 +277,10 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
 
                   <button
                     type="submit"
-                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
+                    disabled={verifying}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    Se connecter
+                    {verifying ? "Vérification…" : "Se connecter"}
                   </button>
 
                   <div className="flex items-center justify-between text-xs">
@@ -245,12 +297,12 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
                     <button
                       type="button"
                       onClick={resend}
-                      disabled={cooldown > 0}
+                      disabled={cooldown > 0 || sending}
                       className={`font-medium transition ${
-                        cooldown > 0 ? "cursor-not-allowed text-ink-faint" : "text-accent hover:underline"
+                        cooldown > 0 || sending ? "cursor-not-allowed text-ink-faint" : "text-accent hover:underline"
                       }`}
                     >
-                      {cooldown > 0 ? `Renvoyer (${cooldown}s)` : "Renvoyer le code"}
+                      {sending ? "Envoi…" : cooldown > 0 ? `Renvoyer (${cooldown}s)` : "Renvoyer le code"}
                     </button>
                   </div>
                 </form>

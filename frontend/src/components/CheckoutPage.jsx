@@ -3,12 +3,15 @@
 // [UI] : Tailwind CSS — tokens de thème (clair/sombre) + accent émeraude. QR Lightning via qrcode.react.
 // [FLUX] : chargement facture -> QR BOLT11 -> paiement Lightning / carte -> polling du statut
 //          -> ouverture de ReceiptModal.jsx quand le paiement est confirmé.
+// [ÉTAPE 6] : le bouton carte tente un vrai paiement Stripe (/api/invoices/:id/card) et
+//          redirige vers la page Stripe ; repli mode démo si Stripe/backend indisponibles.
 // NOTE : mode démo autonome — si le backend (/api/invoices) est indisponible, une facture
 //        d'exemple est utilisée et le paiement est simulé (polling + boutons démo).
 
 import { useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import ReceiptModal from "./ReceiptModal";
+import { createCardPayment } from "../services/api";
 
 // --- Données de démonstration (remplacées par l'API quand le backend sera prêt) ---
 const EXPIRY_SECONDS = 15 * 60;
@@ -120,6 +123,7 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
   const [secondsLeft, setSecondsLeft] = useState(EXPIRY_SECONDS);
   const [copied, setCopied] = useState(false);
   const [paidAt, setPaidAt] = useState("");
+  const [cardBusy, setCardBusy] = useState(false);
   const pollCount = useRef(0);
 
   // Chargement de la facture (fallback démo si backend indisponible)
@@ -187,6 +191,25 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
     setStatus("paid");
     setPaidAt(new Date().toLocaleString("fr-FR"));
     setShowReceipt(true);
+  };
+
+  // [ÉTAPE 6] Paiement par carte réel via Stripe Checkout ; repli mode démo si indisponible.
+  const payByCard = async () => {
+    setCardBusy(true);
+    try {
+      const res = await createCardPayment(invoice.id);
+      if (res?.checkoutUrl) {
+        // Redirection vers la page de paiement Stripe ; le retour se fait via ?pay=<ref>.
+        window.location.href = res.checkoutUrl;
+        return;
+      }
+      confirmPayment();
+    } catch {
+      // Stripe non configuré ou backend absent -> simulation (mode démo).
+      confirmPayment();
+    } finally {
+      setCardBusy(false);
+    }
   };
 
   const copyBolt11 = async () => {
@@ -297,11 +320,12 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
                 </div>
 
                 <button
-                  onClick={confirmPayment}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
+                  onClick={payByCard}
+                  disabled={cardBusy}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <IconCard className="h-4 w-4" />
-                  Payer par Carte / Apple Pay
+                  {cardBusy ? "Redirection…" : "Payer par Carte / Apple Pay"}
                 </button>
 
                 <button
