@@ -1,7 +1,18 @@
-// [FICHIER] : frontend/src/main.jsx
-// [RÔLE] : point d'entrée React (montage de l'application dans le DOM).
-// [À FAIRE PAR L'ÉQUIPE] :
-// - Créer la racine React (createRoot sur #root)
-// - Envelopper <App /> dans <BrowserRouter> (routing /pay/:id)
-// - Importer le style global index.css (Tailwind)
-// [FLUX] : charge App.jsx (routes) et applique les styles Tailwind.
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+import "./index.css";
+
+// Thème par défaut : sombre (identité de marque). Préférence mémorisée.
+try {
+  const saved = localStorage.getItem("teranga-theme");
+  document.documentElement.dataset.theme = saved === "light" ? "light" : "dark";
+} catch {
+  document.documentElement.dataset.theme = "dark";
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);

@@ -1,6 +1,162 @@
-/* [FICHIER] : frontend/src/index.css */
-/* [RÔLE] : feuille de style globale de l'application. */
-/* [À FAIRE PAR L'ÉQUIPE] : */
-/* - Ajouter les directives Tailwind : @tailwind base; @tailwind components; @tailwind utilities; */
-/* - (optionnel) styles de base du body */
-/* [FLUX] : importée par main.jsx, elle porte le style Tailwind de tout le site. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Thème (clair / sombre) via variables CSS.
+   Sombre = identité de marque par défaut. */
+:root {
+  --c-bg: 2 6 23;
+  --c-card: 15 23 42;
+  --c-card-2: 2 6 23;
+  --c-band: 255 255 255;
+  --c-line: 255 255 255;
+  --c-fg: 255 255 255;
+  --c-fg-muted: 203 213 225;
+  --c-fg-subtle: 148 163 184;
+  --c-fg-faint: 100 116 139;
+  --c-accent: 52 211 153;
+  --c-overlay: 2 6 23;
+}
+
+[data-theme="light"] {
+  --c-bg: 248 250 252;
+  --c-card: 255 255 255;
+  --c-card-2: 241 245 249;
+  --c-band: 15 23 42;
+  --c-line: 15 23 42;
+  --c-fg: 15 23 42;
+  --c-fg-muted: 51 65 85;
+  --c-fg-subtle: 100 116 139;
+  --c-fg-faint: 148 163 184;
+  --c-accent: 5 150 105;
+  --c-overlay: 248 250 252;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  @apply bg-base text-ink antialiased;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Transition fluide entre les vues (Landing <-> Dashboard <-> Checkout) */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.35s ease-out both;
+}
+
+/* Arrière-plan animé du Hero (dérive lente + orbes flottantes) */
+@keyframes drift {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1.05);
+  }
+  50% {
+    transform: translate3d(4%, -3%, 0) scale(1.12);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) scale(1.05);
+  }
+}
+
+.animate-drift {
+  animation: drift 16s ease-in-out infinite;
+}
+
+@keyframes floatSlow {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-18px);
+  }
+}
+
+.animate-float-slow {
+  animation: floatSlow 7s ease-in-out infinite;
+}
+
+/* Titre en dégradé animé (émeraude -> teal -> cyan) */
+@keyframes gradientPan {
+  to {
+    background-position: 200% center;
+  }
+}
+
+.gradient-text {
+  background-image: linear-gradient(90deg, #34d399, #2dd4bf, #22d3ee, #34d399);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 26px rgba(16, 185, 129, 0.28));
+  animation: gradientPan 6s linear infinite;
+}
+
+/* Éclat (shine) qui balaie un élément */
+@keyframes shine {
+  0% {
+    transform: translateX(-120%) skewX(-12deg);
+  }
+  60%,
+  100% {
+    transform: translateX(220%) skewX(-12deg);
+  }
+}
+
+.shine::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  animation: shine 4.5s ease-in-out infinite;
+}
+
+/* Bandeau de logos défilant (marquee) */
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  animation: marquee 32s linear infinite;
+}
+
+.marquee:hover .animate-marquee {
+  animation-play-state: paused;
+}
+
+/* Respect des préférences de mouvement réduit */
+@media (prefers-reduced-motion: reduce) {
+  .animate-drift,
+  .animate-float-slow,
+  .animate-marquee,
+  .gradient-text,
+  .shine::after {
+    animation: none;
+  }
+}
