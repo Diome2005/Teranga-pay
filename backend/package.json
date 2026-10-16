@@ -1,19 +1,20 @@
 {
   "name": "teranga-pay-backend",
   "version": "1.0.0",
-  "description": "Teranga Pay - API PSP marchand : liens de paiement Lightning + liquidation FCFA Mobile Money via Bitnob",
+  "description": "Backend Teranga Pay - paiements diaspora Bitcoin Lightning -> FCFA",
   "main": "server.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node --test"
   },
+  "license": "ISC",
   "dependencies": {
     "axios": "^1.7.9",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2"
-  },
-  "engines": {
-    "node": ">=18"
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4"
   }
 }

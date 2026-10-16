@@ -10,5 +10,8 @@ dist/
 # Variables d'environnement (secrets Bitnob)
 .env
 
+# Données persistantes du backend (registres JSON)
+backend/data/
+
 # Logs
 *.log

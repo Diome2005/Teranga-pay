@@ -27,12 +27,15 @@ teranga-pay/
 ├── backend/
 │   ├── .env.example
 │   ├── package.json
-│   ├── server.js                 # serveur Express (à faire)
-│   ├── routes/
-│   │   ├── invoices.js           # création/liste des liens de paiement (à faire)
-│   │   └── webhooks.js           # webhooks Bitnob charge.success / payouts (à faire)
-│   └── services/
-│       └── bitnob.js             # intégration API Bitnob : auth HMAC, invoices, payouts (à faire)
+│   ├── server.js                 # serveur Express : toutes les routes (réalisé)
+│   ├── data/                     # registres JSON persistants (gitignoré)
+│   ├── services/
+│   │   ├── bitnobService.js      # API Bitnob : auth HMAC, invoices, payouts (réalisé)
+│   │   ├── store.js              # persistance JSON fichier (réalisé)
+│   │   ├── auth.js               # auth passwordless : OTP + sessions (réalisé)
+│   │   └── stripe.js             # paiement carte : Stripe Checkout + webhook (réalisé)
+│   └── test/
+│       └── server.test.js        # tests e2e (npm test)
 └── frontend/
     ├── .env.example
     ├── package.json
@@ -47,14 +50,14 @@ teranga-pay/
         ├── main.jsx
         ├── App.jsx               # navigation 3 vues : landing | dashboard | checkout
         ├── index.css             # Tailwind + animations (fade, drift, float)
-        ├── components/
-        │   ├── LandingPage.jsx        # PAGE D'ACCUEIL (réalisée)
-        │   ├── MerchantDashboard.jsx  # dashboard marchand (à faire)
-        │   ├── CheckoutPage.jsx       # page de paiement client (à faire)
-        │   ├── Navbar.jsx             # navbar du dashboard (à faire)
-        │   └── ReceiptModal.jsx       # modale de reçu (à faire)
-        └── services/
-            └── api.js                 # couche API centralisée axios (à faire)
+        └── components/
+            ├── LandingPage.jsx        # PAGE D'ACCUEIL (réalisée)
+            ├── MerchantDashboard.jsx  # dashboard marchand (réalisé)
+            ├── MerchantAuth.jsx       # connexion passwordless (réalisée)
+            ├── CheckoutPage.jsx       # page de paiement client (réalisée)
+            ├── ReceiptModal.jsx       # modale de reçu (réalisée)
+            ├── Navbar.jsx             # (stub inutilisé — le dashboard a son propre en-tête)
+            └── services/api.js        # couche API centralisée axios (réalisée)
 ```
 
 ---
@@ -110,13 +113,45 @@ npm run dev      # http://localhost:5173
 
 ---
 
+## Endpoints backend
+
+| Méthode | Route | Rôle |
+|---|---|---|
+| GET | `/health` | sonde de santé |
+| GET | `/api/whoami` | valide les identifiants Bitnob |
+| POST | `/api/invoices` | crée client + facture Lightning (BOLT11 + QR) |
+| GET | `/api/invoices` | liste des factures (filtres `merchantPhone` / `merchant` / `status`) |
+| GET | `/api/invoices/:id` | détail d'un lien de paiement |
+| GET | `/api/invoices/:id/status` | polling du statut (confirmé via Bitnob) |
+| POST | `/api/invoices/:id/simulate-card` | (démo) encaissement sans paiement réel |
+| POST | `/api/webhooks/bitnob` | webhook signé `btc.lightning.received.success` → liquidation FCFA |
+| GET | `/api/webhooks/bitnob` | sonde du tunnel ngrok |
+| POST | `/api/auth/otp` | demande un code OTP (passwordless) |
+| POST | `/api/auth/otp/verify` | vérifie le code → jeton de session |
+| GET | `/api/merchants/me` | profil marchand (protégé `Bearer`) |
+| PUT | `/api/merchants/me` | met à jour le profil (ex. `{ shop }`) |
+| POST | `/api/invoices/:id/card` | crée une session Stripe Checkout (carte / Apple Pay) |
+| POST | `/api/webhooks/stripe` | webhook Stripe signé → facture payée |
+
+Lancer + tester le backend :
+
+```bash
+cd backend
+npm install
+npm test        # tests e2e (santé, OTP, webhooks signés, Stripe)
+npm run dev     # http://localhost:5000
+```
+
+---
+
 ## À faire par l'équipe
 
-- Backend : serveur Express, routes `invoices` / `webhooks`, service `bitnob.js`
-  (auth HMAC-SHA256, création d'invoices Lightning, payouts Mobile Money en 3 étapes).
-- Frontend : `MerchantDashboard.jsx`, `CheckoutPage.jsx`, `Navbar.jsx`, `ReceiptModal.jsx`,
-  `services/api.js`.
-- Flux de bout en bout : lien marchand → paiement Lightning / carte → webhook `charge.success`
-  → payout FCFA (Wave / Orange Money).
+- ~~Backend : serveur Express, routes `invoices` / `webhooks`, service `bitnob.js`~~ ✅ **fait**
+- ~~Persistance (registres factures/OTP/sessions persistants)~~ ✅ **fait** (JSON fichier, `services/store.js`)
+- ~~Auth passwordless (OTP)~~ ✅ **fait** (`services/auth.js`) — brancher un vrai envoi SMS là où le stub journalise
+- ~~Paiement carte (Stripe Checkout + webhook)~~ ✅ **fait** (`services/stripe.js`) — renseigner `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
+- Remplacer le store JSON par une vraie base (Postgres/SQLite) si besoin — même API Map-like.
+- Frontend : brancher `CheckoutPage` / `MerchantDashboard` sur les routes OTP et carte (`/api/auth/otp`, `/api/invoices/:id/card`).
+- Flux de bout en bout : lien marchand → paiement Lightning / carte → webhook `charge.success` → payout FCFA (Wave / Orange Money).
 - Variables d'environnement : voir `backend/.env.example` et `frontend/.env.example`.
 - Scénario de démonstration de bout en bout pour le jury.
