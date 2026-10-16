@@ -81,23 +81,38 @@ async function getLightningInvoice(id) {
 }
 
 // Vérifie la signature d'un webhook Bitnob.
-//   En-tête : x-bitnob-signature = HMAC-SHA512(body brut, WEBHOOK_SECRET) en hex.
+//   En-tête : x-bitnob-signature = HMAC du corps brut, en hex.
 //   `rawBody` doit être le corps EXACT reçu (chaîne), pas le JSON reparsé.
+//   [NOTE DOC] La doc Bitnob est ambiguë : HMAC-SHA512 (webhooks/stablecoins) mais aussi
+//   HMAC-SHA256 (security best practices), et le « secret » peut être soit
+//   BITNOB_WEBHOOK_SECRET soit BITNOB_CLIENT_SECRET. Plutôt que de parier sur une seule
+//   combinaison, on teste toutes les paires (secret × algorithme) : si l'une matche, le
+//   webhook est authentique. services/webhookDebug.js journalise le combo exact reçu.
 //   Comparaison à temps constant pour éviter les attaques temporelles.
-// Retourne true/false, ou null si aucun secret n'est configuré.
+// Retourne true/false, ou null si AUCUN secret n'est configuré.
 function verifyWebhookSignature(rawBody, signature) {
-  const secret = process.env.BITNOB_WEBHOOK_SECRET;
-  if (!secret) return null;
+  const secrets = [
+    process.env.BITNOB_WEBHOOK_SECRET,
+    process.env.BITNOB_CLIENT_SECRET,
+  ].filter(Boolean);
+  if (secrets.length === 0) return null;
+  if (!signature) return false;
 
-  const expected = crypto
-    .createHmac("sha512", secret)
-    .update(rawBody || "", "utf8")
-    .digest("hex");
+  const algos = ["sha512", "sha256"];
+  const received = Buffer.from(String(signature).toLowerCase(), "utf8");
 
-  const expectedBuf = Buffer.from(expected, "utf8");
-  const receivedBuf = Buffer.from(signature || "", "utf8");
-  if (expectedBuf.length !== receivedBuf.length) return false;
-  return crypto.timingSafeEqual(expectedBuf, receivedBuf);
+  for (const secret of secrets) {
+    for (const algo of algos) {
+      const expected = Buffer.from(
+        crypto.createHmac(algo, secret).update(rawBody || "", "utf8").digest("hex"),
+        "utf8"
+      );
+      if (expected.length === received.length && crypto.timingSafeEqual(expected, received)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 /* ==================================================================

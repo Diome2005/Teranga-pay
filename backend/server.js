@@ -507,6 +507,15 @@ app.post("/api/webhooks/bitnob", (req, res) => {
   const signature = req.get("x-bitnob-signature");
   const rawBody = req.rawBody ? req.rawBody.toString("utf8") : "";
 
+  // [DEBUG] WEBHOOK_DEBUG=true : journalise quel secret × algorithme matche la signature reçue.
+  if (process.env.WEBHOOK_DEBUG === "true") {
+    try {
+      require("./services/webhookDebug").report(rawBody, signature);
+    } catch {
+      /* best effort */
+    }
+  }
+
   const verified = bitnob.verifyWebhookSignature(rawBody, signature);
   if (verified === null) {
     // Pas de secret configuré : on accepte en dev mais on prévient clairement.

@@ -151,3 +151,48 @@ test("POST /api/invoices/:id/card -> 503 si Stripe non configuré", async () => 
   assert.equal(status, 503);
   assert.equal(data.success, false);
 });
+
+// ------------------------------------------------- debug webhook (secret × algo)
+test("webhookDebug identifie la bonne combinaison secret × algorithme", () => {
+  const { checkCandidates } = require("../services/webhookDebug");
+  const body = JSON.stringify({ event: "btc.lightning.received.success", reference: "dbg" });
+
+  // Signature générée avec BITNOB_WEBHOOK_SECRET en SHA-512 (cas nominal).
+  const good = crypto
+    .createHmac("sha512", process.env.BITNOB_WEBHOOK_SECRET)
+    .update(body, "utf8")
+    .digest("hex");
+  let res = checkCandidates(body, good).filter((r) => r.match);
+  assert.equal(res.length, 1);
+  assert.equal(res[0].secret, "BITNOB_WEBHOOK_SECRET");
+  assert.equal(res[0].algo, "sha512");
+
+  // Signature générée avec BITNOB_WEBHOOK_SECRET en SHA-256 : le helper doit
+  // identifier la combinaison sha256 × même secret (pas sha512).
+  const sha256 = crypto
+    .createHmac("sha256", process.env.BITNOB_WEBHOOK_SECRET)
+    .update(body, "utf8")
+    .digest("hex");
+  res = checkCandidates(body, sha256).filter((r) => r.match);
+  assert.equal(res.length, 1);
+  assert.equal(res[0].secret, "BITNOB_WEBHOOK_SECRET");
+  assert.equal(res[0].algo, "sha256");
+
+  // Signature inconnue -> aucun match.
+  res = checkCandidates(body, "deadbeef").filter((r) => r.match);
+  assert.equal(res.length, 0);
+});
+
+// ------------------------------------- robustesse de verifyWebhookSignature
+test("verifyWebhookSignature accepte WEBHOOK_SECRET×sha512 ET CLIENT_SECRET×sha256", () => {
+  const bitnob = require("../services/bitnobService");
+  const body = JSON.stringify({ event: "btc.lightning.received.success", reference: "rob" });
+
+  const a = crypto.createHmac("sha512", process.env.BITNOB_WEBHOOK_SECRET).update(body, "utf8").digest("hex");
+  assert.equal(bitnob.verifyWebhookSignature(body, a), true);
+
+  const b = crypto.createHmac("sha256", process.env.BITNOB_CLIENT_SECRET).update(body, "utf8").digest("hex");
+  assert.equal(bitnob.verifyWebhookSignature(body, b), true);
+
+  assert.equal(bitnob.verifyWebhookSignature(body, "deadbeef"), false);
+});
