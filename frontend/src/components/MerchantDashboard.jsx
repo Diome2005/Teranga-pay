@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { createPaymentLink } from "../services/api";
+import { createPaymentLink, listPaymentLinks } from "../services/api";
 
 const STORAGE_PREFIX = "teranga-invoices";
 const DEFAULT_SHOP = "Atelier Awa Couture";
@@ -181,6 +181,18 @@ function loadInvoices(key) {
   } catch {
     return [];
   }
+}
+
+// Fusionne l'historique local avec celui du backend.
+// Le backend fait foi (statut paid/pending, payout, bolt11) ; les factures
+// créées hors-ligne (non présentes côté backend) sont conservées.
+function mergeInvoices(localList, remoteList) {
+  const map = new Map();
+  for (const inv of localList) map.set(inv.reference || inv.id, inv);
+  for (const inv of remoteList) map.set(inv.reference || inv.id, inv);
+  const merged = [...map.values()];
+  merged.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  return merged;
 }
 
 function formatXOF(value) {
@@ -727,6 +739,27 @@ export default function MerchantDashboard({
       /* stockage indisponible — on ignore */
     }
   }, [invoices, storageKey]);
+
+  // [ÉTAPE A] Synchronise l'historique depuis le backend au montage.
+  // Repli silencieux sur le local si le backend est indisponible.
+  useEffect(() => {
+    const digits = phoneDigits(session?.phone || "");
+    if (!digits) return; // mode démo sans numéro : pas d'appel
+    let cancelled = false;
+    listPaymentLinks({ merchantPhone: digits })
+      .then((res) => {
+        if (cancelled) return;
+        const remote = Array.isArray(res?.invoices) ? res.invoices.map(fromApi) : [];
+        if (!remote.length) return;
+        setInvoices((prev) => mergeInvoices(prev, remote));
+      })
+      .catch(() => {
+        /* backend indisponible : on garde l'historique local */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [storageKey, session?.phone]);
 
   const stats = useMemo(() => {
     const paid = invoices.filter((i) => i.status === "paid");
