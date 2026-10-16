@@ -162,6 +162,7 @@ async function liquidateMerchantPayout(event) {
 
   if (!entry.merchantPhone || !entry.amountXOF) {
     entry.payoutStatus = "skipped";
+    invoicesStore.set(entry.reference, entry);
     console.warn(
       `[teranga-pay] Facture ${reference} sans numéro marchand ou montant XOF — liquidation ignorée.`
     );
@@ -180,6 +181,7 @@ async function liquidateMerchantPayout(event) {
     console.log(`  montant      : ${entry.amountXOF} FCFA`);
     console.log("=========================================================");
     entry.payoutStatus = "simulated";
+    invoicesStore.set(entry.reference, entry);
     return;
   }
 
@@ -206,6 +208,7 @@ async function liquidateMerchantPayout(event) {
       fees: payout.finalized?.fees || null,
       exchangeRate: payout.finalized?.exchange_rate || null,
     };
+    invoicesStore.set(entry.reference, entry);
 
     console.log("=========================================================");
     console.log("[teranga-pay] LIQUIDATION FCFA SOUMISE ✅");
@@ -219,6 +222,7 @@ async function liquidateMerchantPayout(event) {
     const { status, details } = bitnobError(error);
     entry.payoutStatus = "failed";
     entry.payoutError = { status, details };
+    invoicesStore.set(entry.reference, entry);
     console.error(
       `[teranga-pay] ÉCHEC liquidation ${reference} (${status}) :`,
       JSON.stringify(details)
@@ -242,6 +246,7 @@ function markInvoicePaid(entry, source = "interne") {
 
   entry.status = "paid";
   entry.paidAt = new Date().toISOString();
+  invoicesStore.set(entry.reference, entry); // persistance du statut sur disque
   console.log(`[teranga-pay] Facture ${entry.reference} marquée PAYÉE (source=${source}).`);
 
   liquidateMerchantPayout({ reference: entry.reference }).catch((error) => {
@@ -251,6 +256,60 @@ function markInvoicePaid(entry, source = "interne") {
     );
   });
   return true;
+}
+
+// [ÉTAPE 5] — Dénouement d'un payout (webhook payouts.withdrawal.success / .expired).
+//   Le payout est lancé avec la référence `payout-<reference>` ; on retire ce préfixe
+//   pour retrouver la facture. Met à jour payoutStatus : "completed" (reçu) ou "failed".
+function handlePayoutEvent(event) {
+  const rawRef =
+    event.reference ||
+    event.invoice_reference ||
+    event.data?.reference ||
+    event.data?.payout?.reference ||
+    event.data?.transaction?.reference ||
+    null;
+  const reference = rawRef ? String(rawRef).replace(/^payout-/, "") : null;
+  const type = String(event.event || event.type || "").toLowerCase();
+  const remoteStatus = String(
+    event.data?.payout?.status || event.data?.status || event.status || ""
+  ).toUpperCase();
+
+  const entry = reference ? findInvoice(reference) : null;
+  if (!entry) {
+    console.warn(
+      `[teranga-pay] Payout webhook sans facture correspondante (ref="${rawRef}", type="${type}").`
+    );
+    return;
+  }
+
+  const succeeded = type.includes("success") || remoteStatus === "SUCCESS" || remoteStatus === "COMPLETED";
+  const failed = type.includes("expired") || type.includes("failed") || remoteStatus === "EXPIRED" || remoteStatus === "FAILED";
+
+  if (succeeded) {
+    entry.payoutStatus = "completed";
+    entry.payout = {
+      ...(entry.payout || {}),
+      status: remoteStatus || "SUCCESS",
+      completedAt: new Date().toISOString(),
+    };
+    console.log("======================================================");
+    console.log("[teranga-pay] PAYOUT MOBILE MONEY CONFIRMÉ ✅");
+    console.log(`  facture    : ${reference}`);
+    console.log(`  montant    : ${entry.amountXOF} FCFA -> ${entry.merchantPhone} (${entry.provider})`);
+    console.log(`  statut     : ${entry.payout.status}`);
+    console.log("======================================================");
+  } else if (failed) {
+    entry.payoutStatus = "failed";
+    entry.payoutError = { reason: type || remoteStatus, details: event.data || null };
+    console.warn(
+      `[teranga-pay] PAYOUT MOBILE MONEY ÉCHOUÉ ✗ ${reference} (type="${type}") — à relancer manuellement.`
+    );
+  } else {
+    console.log(`[teranga-pay] Payout webhook reçu pour ${reference} (type="${type}").`);
+  }
+
+  invoicesStore.set(entry.reference, entry);
 }
 
 // GET /api/whoami — valide les identifiants Bitnob (sandbox/prod).
@@ -548,6 +607,9 @@ app.post("/api/webhooks/bitnob", (req, res) => {
     // markInvoicePaid est idempotent : webhook + polling ne liquident qu'une fois.
     const entry = findInvoice(event.reference || event.payment_hash);
     markInvoicePaid(entry, "webhook-bitnob");
+  } else if (eventType.startsWith("payouts.")) {
+    // [ÉTAPE 5] Cycle de vie du payout (withdrawal.success / withdrawal.expired).
+    handlePayoutEvent(event);
   } else {
     console.log(`[teranga-pay] Webhook Bitnob reçu (event="${eventType}")`);
   }
@@ -567,11 +629,16 @@ app.get("/api/webhooks/bitnob", (req, res) => {
 
 // POST /api/auth/otp — demande un code de vérification pour un numéro.
 // Body : { phone, shop? }
-app.post("/api/auth/otp", (req, res) => {
+app.post("/api/auth/otp", async (req, res) => {
   const { phone, shop } = req.body || {};
-  const result = auth.requestOtp(phone, shop);
-  if (!result.ok) return res.status(400).json({ success: false, error: result.error });
-  res.status(200).json({ success: true, ...result });
+  try {
+    const result = await auth.requestOtp(phone, shop);
+    if (!result.ok) return res.status(400).json({ success: false, error: result.error });
+    res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error("[teranga-pay] OTP erreur :", error.message || error);
+    res.status(500).json({ success: false, error: "Impossible de demander un code." });
+  }
 });
 
 // POST /api/auth/otp/verify — vérifie le code et ouvre une session (renvoie un jeton).

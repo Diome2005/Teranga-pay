@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { createPaymentLink, listPaymentLinks } from "../services/api";
+import { createPaymentLink, listPaymentLinks, updateMerchant } from "../services/api";
 
 const STORAGE_PREFIX = "teranga-invoices";
 const DEFAULT_SHOP = "Atelier Awa Couture";
@@ -576,12 +576,23 @@ function AccountCard({ icon: Icon, title, subtitle, children }) {
 function AccountView({ session, onSessionChange, onLogout }) {
   const [shop, setShop] = useState(session?.shop || DEFAULT_SHOP);
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [copiedKey, setCopiedKey] = useState(false);
   const key = spaceKey(session?.phone || "");
 
-  const saveShop = (event) => {
+  // Enregistre le nom de boutique : persiste côté backend (PUT /merchants/me) si un
+  // jeton de session existe, sinon repli sur la session locale (mode démo autonome).
+  const saveShop = async (event) => {
     event.preventDefault();
     const value = shop.trim() || DEFAULT_SHOP;
+    setSaving(true);
+    try {
+      if (session?.token) await updateMerchant(session.token, { shop: value });
+    } catch {
+      /* backend indisponible : on conserve la valeur en session locale */
+    } finally {
+      setSaving(false);
+    }
     onSessionChange?.({ ...session, shop: value });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -612,9 +623,10 @@ function AccountView({ session, onSessionChange, onLogout }) {
           />
           <button
             type="submit"
-            className="shrink-0 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
+            disabled={saving}
+            className="shrink-0 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {saved ? "Enregistré" : "Enregistrer"}
+            {saved ? "Enregistré" : saving ? "…" : "Enregistrer"}
           </button>
         </form>
       </AccountCard>

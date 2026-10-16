@@ -1,13 +1,14 @@
 // [FICHIER] : backend/services/auth.js
 // [RÔLE] : authentification "sans mot de passe" du marchand (passwordless).
 // [FLUX] : numéro Mobile Money -> code OTP (TTL) -> jeton de session.
-// [SMS] : l'envoi réel (SMS/WhatsApp) dépend d'un prestataire ; par défaut le code est
-//   journalisé côté serveur. En DEMO_MODE=true le code est renvoyé dans la réponse pour
-//   la démonstration. Pas de dépendance externe -> aucun risque de crash.
+// [SMS] : envoi réel via services/sms.js (Twilio / WhatsApp Cloud API). Sans prestataire
+//   configuré, le code est journalisé côté serveur. En DEMO_MODE=true le code est renvoyé
+//   dans la réponse pour la démonstration.
 // [SÉCURITÉ] : limité en tentatives (MAX_ATTEMPTS) + délai de renvoi (RESEND_COOLDOWN).
 
 const crypto = require("crypto");
 const { collection } = require("./store");
+const sms = require("./sms");
 
 const OTP_TTL_SECONDS = Number(process.env.OTP_TTL_SECONDS) || 300; // 5 min
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS) || 30 * 24 * 3600; // 30 j
@@ -43,8 +44,8 @@ function randomDigits(n) {
   return String(crypto.randomInt(0, 10 ** n)).padStart(n, "0");
 }
 
-// Enregistre un OTP pour `phone` et le journalise (stub SMS).
-function requestOtp(phoneRaw, shop) {
+// Enregistre un OTP pour `phone` et l'envoie (SMS/WhatsApp, sinon console).
+async function requestOtp(phoneRaw, shop) {
   const phone = normalizePhone(phoneRaw);
   if (!isValidSenegalPhone(phone)) {
     return { ok: false, error: "Numéro Mobile Money invalide (format 9 chiffres, Sénégal)." };
@@ -66,12 +67,30 @@ function requestOtp(phoneRaw, shop) {
     shop: shop || null,
   });
 
-  // [SMS] Point d'extension : brancher ici un provider (Twilio / WhatsApp Cloud API…).
-  console.log(`[teranga-pay] OTP envoyé vers ${phone} — code=${code} (TTL ${OTP_TTL_SECONDS}s)`);
+  // [SMS] Envoi réel via le prestataire configuré (Twilio / WhatsApp Cloud API) ;
+  // sans prestataire configuré, le code reste journalisé (services/sms.js).
+  const message = `Teranga Pay : votre code de connexion est ${code}. Valable ${Math.round(
+    OTP_TTL_SECONDS / 60
+  )} min. Ne le partagez avec personne.`;
+  const delivery = await sms.sendSms({ to: phone, message });
+
+  if (delivery.channel === "console") {
+    console.log(`[teranga-pay] OTP envoyé vers ${phone} — code=${code} (TTL ${OTP_TTL_SECONDS}s)`);
+  } else if (delivery.ok) {
+    console.log(
+      `[teranga-pay] OTP envoyé vers ${phone} via ${delivery.channel} (ref=${delivery.ref || "?"})`
+    );
+  } else {
+    console.warn(
+      `[teranga-pay] Échec d'envoi ${delivery.channel} vers ${phone} — code=${code} (repli console)`
+    );
+  }
 
   return {
     ok: true,
     phone,
+    channel: delivery.channel,
+    delivered: delivery.ok,
     expiresIn: OTP_TTL_SECONDS,
     resendAfter: RESEND_COOLDOWN_SECONDS,
     // En démo, on renvoie le code pour faciliter la démonstration jury.

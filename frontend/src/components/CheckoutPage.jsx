@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import ReceiptModal from "./ReceiptModal";
-import { createCardPayment } from "../services/api";
+import { createCardPayment, getPaymentLink, getPaymentStatus, simulateCardPayment } from "../services/api";
 
 // --- Données de démonstration (remplacées par l'API quand le backend sera prêt) ---
 const EXPIRY_SECONDS = 15 * 60;
@@ -116,7 +116,7 @@ function findLocalInvoice(id) {
 }
 
 /* ---------------------- Composant ======================= */
-export default function CheckoutPage({ invoiceId, onViewChange }) {
+export default function CheckoutPage({ invoiceId, justPaid, onViewChange }) {
   const [invoice, setInvoice] = useState(DEMO_INVOICE);
   const [status, setStatus] = useState("pending"); // pending | paid | expired
   const [showReceipt, setShowReceipt] = useState(false);
@@ -133,10 +133,8 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
 
     (async () => {
       try {
-        const res = await fetch(`/api/invoices/${invoiceId}`);
-        if (!res.ok) throw new Error("not found");
-        const data = await res.json();
-        if (alive) setInvoice((prev) => ({ ...prev, ...data, id: invoiceId }));
+        const data = await getPaymentLink(invoiceId);
+        if (alive && data) setInvoice((prev) => ({ ...prev, ...data, id: invoiceId }));
       } catch {
         const local = findLocalInvoice(invoiceId);
         if (alive) setInvoice((prev) => ({ ...prev, ...(local || {}), id: invoiceId }));
@@ -168,11 +166,8 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
       let paid = false;
 
       try {
-        const res = await fetch(`/api/invoices/${invoice.id}/status`);
-        if (res.ok) {
-          const data = await res.json();
-          paid = data.status === "paid" || data.status === "confirmed";
-        }
+        const data = await getPaymentStatus(invoice.id);
+        paid = data.status === "paid" || data.status === "confirmed";
       } catch {
         // backend indisponible -> mode démo
       }
@@ -193,6 +188,12 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
     setShowReceipt(true);
   };
 
+  // Retour depuis Stripe Checkout (?paid=1) : le paiement est confirmé côté serveur.
+  useEffect(() => {
+    if (justPaid) confirmPayment();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [justPaid]);
+
   // [ÉTAPE 6] Paiement par carte réel via Stripe Checkout ; repli mode démo si indisponible.
   const payByCard = async () => {
     setCardBusy(true);
@@ -210,6 +211,16 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
     } finally {
       setCardBusy(false);
     }
+  };
+
+  // (Démo) encaissement simulé via le backend (POST /simulate-card) ; repli local si absent.
+  const simulatePayment = async () => {
+    try {
+      await simulateCardPayment(invoice.id);
+    } catch {
+      // Backend indisponible ou mode réel -> simulation locale.
+    }
+    confirmPayment();
   };
 
   const copyBolt11 = async () => {
@@ -329,7 +340,7 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
                 </button>
 
                 <button
-                  onClick={confirmPayment}
+                  onClick={simulatePayment}
                   className="mt-3 w-full rounded-lg border border-line/10 py-2 text-xs text-ink-subtle transition hover:bg-band/5"
                 >
                   Simuler le paiement (démo)

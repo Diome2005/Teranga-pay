@@ -7,7 +7,9 @@ process.env.DATA_DIR = require("os").tmpdir() + require("path").sep + "teranga-t
 process.env.DEMO_MODE = "true";
 process.env.BITNOB_WEBHOOK_SECRET = "test_bitnob_secret";
 process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_secret";
-delete process.env.STRIPE_SECRET_KEY; // => service carte "non configuré" pour le test 503
+// Chaîne vide (et non suppression) : dotenv ne réécrit pas une clé déjà présente,
+// ce qui force bien le service carte "non configuré" pour le test 503.
+process.env.STRIPE_SECRET_KEY = "";
 
 const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
@@ -135,6 +137,119 @@ test("Persistance : la facture survit à une relecture du store", () => {
   const reloaded = new (require("../services/store").JsonCollection)("invoices");
   const first = [...reloaded.values()][0];
   assert.ok(first, "le store JSON doit contenir au moins une facture");
+});
+
+// ------------------------------------------------- payout life cycle webhook
+test("Webhook payouts.withdrawal.success confirme le payout (completed)", async () => {
+  const reference = "test-payout-ref-" + Date.now();
+  store.collection("invoices").set(reference, {
+    invoiceId: "inv_payout_1",
+    reference,
+    description: "Test payout",
+    amountSat: 1000,
+    amountXOF: 5000,
+    merchant: "Boutique Test",
+    merchantPhone: "771234567",
+    provider: "wave",
+    status: "paid",
+    payoutStatus: "simulated",
+    createdAt: new Date().toISOString(),
+  });
+
+  const payload = JSON.stringify({
+    event: "payouts.withdrawal.success",
+    reference: `payout-${reference}`,
+    data: { payout: { status: "SUCCESS" } },
+  });
+
+  const res = await fetch(base + "/api/webhooks/bitnob", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-bitnob-signature": signBitnob(payload) },
+    body: payload,
+  });
+  assert.equal(res.status, 200);
+
+  const status = await jsonFetch(`/api/invoices/${reference}/status`);
+  assert.equal(status.data.payoutStatus, "completed");
+});
+
+test("Webhook payouts.withdrawal.expired marque le payout en échec", async () => {
+  const reference = "test-payout-fail-" + Date.now();
+  store.collection("invoices").set(reference, {
+    invoiceId: "inv_payout_2",
+    reference,
+    description: "Test payout échec",
+    amountSat: 1000,
+    amountXOF: 5000,
+    merchant: "Boutique Test",
+    merchantPhone: "771234567",
+    provider: "orange",
+    status: "paid",
+    payoutStatus: "simulated",
+    createdAt: new Date().toISOString(),
+  });
+
+  const payload = JSON.stringify({
+    event: "payouts.withdrawal.expired",
+    reference: `payout-${reference}`,
+  });
+  const res = await fetch(base + "/api/webhooks/bitnob", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-bitnob-signature": signBitnob(payload) },
+    body: payload,
+  });
+  assert.equal(res.status, 200);
+
+  const status = await jsonFetch(`/api/invoices/${reference}/status`);
+  assert.equal(status.data.payoutStatus, "failed");
+});
+
+// ---------------------------------------------------------------- SMS
+test("SMS : repli console quand aucun prestataire n'est configuré", async () => {
+  const prev = {
+    sid: process.env.TWILIO_ACCOUNT_SID,
+    token: process.env.TWILIO_AUTH_TOKEN,
+    from: process.env.TWILIO_FROM,
+    waToken: process.env.WHATSAPP_TOKEN,
+    waPhone: process.env.WHATSAPP_PHONE_ID,
+  };
+  delete process.env.TWILIO_ACCOUNT_SID;
+  delete process.env.TWILIO_AUTH_TOKEN;
+  delete process.env.TWILIO_FROM;
+  delete process.env.WHATSAPP_TOKEN;
+  delete process.env.WHATSAPP_PHONE_ID;
+
+  const sms = require("../services/sms");
+  assert.equal(sms.activeChannel(), "console");
+  const result = await sms.sendSms({ to: "+221771234567", message: "test" });
+  assert.equal(result.ok, true);
+  assert.equal(result.channel, "console");
+
+  Object.assign(process.env, {
+    TWILIO_ACCOUNT_SID: prev.sid,
+    TWILIO_AUTH_TOKEN: prev.token,
+    TWILIO_FROM: prev.from,
+    WHATSAPP_TOKEN: prev.waToken,
+    WHATSAPP_PHONE_ID: prev.waPhone,
+  });
+});
+
+test("SMS : le canal Twilio est prioritaire sur WhatsApp quand configuré", () => {
+  const sms = require("../services/sms");
+  process.env.TWILIO_ACCOUNT_SID = "AC_test";
+  process.env.TWILIO_AUTH_TOKEN = "token_test";
+  process.env.TWILIO_FROM = "+123456789";
+  process.env.WHATSAPP_TOKEN = "wa_test";
+  process.env.WHATSAPP_PHONE_ID = "123";
+  assert.equal(sms.activeChannel(), "twilio");
+
+  delete process.env.TWILIO_ACCOUNT_SID;
+  delete process.env.TWILIO_AUTH_TOKEN;
+  delete process.env.TWILIO_FROM;
+  assert.equal(sms.activeChannel(), "whatsapp");
+
+  delete process.env.WHATSAPP_TOKEN;
+  delete process.env.WHATSAPP_PHONE_ID;
 });
 
 // ---------------------------------------------------------------- Stripe (carte)

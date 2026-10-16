@@ -33,7 +33,10 @@ teranga-pay/
 │   │   ├── bitnobService.js      # API Bitnob : auth HMAC, invoices, payouts (réalisé)
 │   │   ├── store.js              # persistance JSON fichier (réalisé)
 │   │   ├── auth.js               # auth passwordless : OTP + sessions (réalisé)
+│   │   ├── sms.js                # envoi OTP SMS/WhatsApp (Twilio / Cloud API) (réalisé)
 │   │   └── stripe.js             # paiement carte : Stripe Checkout + webhook (réalisé)
+│   ├── scripts/
+│   │   └── demo-e2e.js           # scénario de démonstration bout-en-bout (npm run demo)
 │   └── test/
 │       └── server.test.js        # tests e2e (npm test)
 └── frontend/
@@ -124,7 +127,7 @@ npm run dev      # http://localhost:5173
 | GET | `/api/invoices/:id` | détail d'un lien de paiement |
 | GET | `/api/invoices/:id/status` | polling du statut (confirmé via Bitnob) |
 | POST | `/api/invoices/:id/simulate-card` | (démo) encaissement sans paiement réel |
-| POST | `/api/webhooks/bitnob` | webhook signé `btc.lightning.received.success` → liquidation FCFA |
+| POST | `/api/webhooks/bitnob` | webhook signé : `btc.lightning.received.success` → liquidation FCFA ; `payouts.withdrawal.success` / `.expired` → statut du payout |
 | GET | `/api/webhooks/bitnob` | sonde du tunnel ngrok |
 | POST | `/api/auth/otp` | demande un code OTP (passwordless) |
 | POST | `/api/auth/otp/verify` | vérifie le code → jeton de session |
@@ -138,9 +141,47 @@ Lancer + tester le backend :
 ```bash
 cd backend
 npm install
-npm test        # tests e2e (santé, OTP, webhooks signés, Stripe)
+npm test        # tests e2e (santé, OTP, webhooks signés, payouts, Stripe)
 npm run dev     # http://localhost:5000
+npm run demo    # scénario de démonstration bout-en-bout (jury)
 ```
+
+---
+
+## Démonstration de bout en bout (jury)
+
+`npm run demo` (backend) démarre le serveur avec un registre temporaire en `DEMO_MODE` et
+joue le parcours complet **sans dépendre de Bitnob / Stripe / ngrok** :
+
+1. **Santé** — `GET /health`.
+2. **Connexion marchand passwordless** — OTP (`/api/auth/otp` → `/verify`) puis profil protégé.
+3. **Création d'une facture** — lien de paiement (facture injectée dans le registre).
+4. **Paiement Lightning** — webhook signé `btc.lightning.received.success` → facture **payée**
+   + liquidation FCFA **simulée** vers Wave.
+5. **Dénouement du payout** — webhook `payouts.withdrawal.success` → payout `completed`.
+6. **Paiement carte (démo)** — `POST /invoices/:id/simulate-card` → facture payée.
+
+Sortie : un récapitulatif `OK`/`KO` par étape, code de sortie 0 si tout passe. Le script
+`backend/scripts/demo-e2e.js` peut servir de trame au scénario présenté au jury.
+
+> En complément : le **frontend** peut être démontré sans backend (repli mode démo intégré à
+> `CheckoutPage` / `MerchantDashboard`), et avec backend via le proxy Vite `npm run dev`.
+
+---
+
+## Envoi des codes OTP (SMS / WhatsApp)
+
+L'envoi réel est branché dans `backend/services/auth.js` via `backend/services/sms.js` :
+le premier prestataire configuré est utilisé, sinon le code est **journalisé côté serveur**
+(dev / démo). En `DEMO_MODE=true`, le code est aussi renvoyé dans la réponse HTTP (`demoCode`).
+
+| Prestataire | Variables d'environnement |
+|---|---|
+| Twilio (SMS) | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM` |
+| WhatsApp Cloud API | `WHATSAPP_TOKEN`, `WHATSAPP_PHONE_ID` |
+
+Sans aucune de ces variables, `activeChannel()` renvoie `console` et le parcours reste
+fonctionnel (aucun crash si le prestataire est absent).
 
 ---
 
@@ -148,10 +189,10 @@ npm run dev     # http://localhost:5000
 
 - ~~Backend : serveur Express, routes `invoices` / `webhooks`, service `bitnob.js`~~ ✅ **fait**
 - ~~Persistance (registres factures/OTP/sessions persistants)~~ ✅ **fait** (JSON fichier, `services/store.js`)
-- ~~Auth passwordless (OTP)~~ ✅ **fait** (`services/auth.js`) — brancher un vrai envoi SMS là où le stub journalise
+- ~~Auth passwordless (OTP)~~ ✅ **fait** (`services/auth.js`) + envoi SMS/WhatsApp réel (`services/sms.js`)
 - ~~Paiement carte (Stripe Checkout + webhook)~~ ✅ **fait** (`services/stripe.js`) — renseigner `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
+- ~~Frontend : brancher `CheckoutPage` / `MerchantDashboard` sur les routes OTP et carte~~ ✅ **fait** (helpers `services/api.js`, y compris `PUT /merchants/me`)
+- ~~Flux de bout en bout : lien marchand → paiement Lightning / carte → webhook → payout FCFA~~ ✅ **fait** (`npm run demo`)
+- ~~Scénario de démonstration de bout en bout pour le jury~~ ✅ **fait** (`scripts/demo-e2e.js`)
 - Remplacer le store JSON par une vraie base (Postgres/SQLite) si besoin — même API Map-like.
-- Frontend : brancher `CheckoutPage` / `MerchantDashboard` sur les routes OTP et carte (`/api/auth/otp`, `/api/invoices/:id/card`).
-- Flux de bout en bout : lien marchand → paiement Lightning / carte → webhook `charge.success` → payout FCFA (Wave / Orange Money).
 - Variables d'environnement : voir `backend/.env.example` et `frontend/.env.example`.
-- Scénario de démonstration de bout en bout pour le jury.
