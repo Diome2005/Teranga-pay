@@ -28,6 +28,16 @@ export async function listPaymentLinks(params, token) {
   return data;
 }
 
+// Activité récente du portefeuille BTC du marchand (dépôts / paiements).
+// Proxy backend vers GET /api/transactions de Bitnob. Protégé : jeton requis.
+export async function listWalletTransactions(token, params) {
+  const { data } = await api.get("/wallet/transactions", {
+    params,
+    headers: authHeaders(token),
+  });
+  return data;
+}
+
 // Détail d'un lien (page checkout client)
 export async function getPaymentLink(id) {
   const { data } = await api.get(`/invoices/${id}`);

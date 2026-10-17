@@ -230,6 +230,49 @@ test("Factures : 401 sans jeton, création/liste scopées au compte connecté", 
   assert.ok(!otherList.data.invoices.some((i) => i.description === "Facture scopée (test)"));
 });
 
+// ------------------------------------------------- activité BTC du portefeuille
+test("GET /api/wallet/transactions : 401 sans jeton, activité scopée au marchand", async () => {
+  const phone = "770555667";
+  const reg = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { email: `btc+${Date.now()}@teranga.sn`, password: "motdepasse123", phone, shop: "Boutique BTC" },
+  });
+  const token = reg.data.session.token;
+
+  // Sans jeton -> 401.
+  const anon = await jsonFetch("/api/wallet/transactions");
+  assert.equal(anon.status, 401);
+
+  // Facture payée du marchand (injectée dans le registre, DEMO_MODE reconstruit l'activité).
+  const reference = "btc-ref-" + Date.now();
+  store.collection("invoices").set(reference, {
+    reference,
+    description: "Vente test BTC",
+    amountSat: 2080,
+    amountXOF: 5000,
+    merchant: "Boutique BTC",
+    merchantPhone: phone,
+    provider: "wave",
+    status: "paid",
+    paidAt: new Date().toISOString(),
+    paymentHash: "ph_btc_test",
+    createdAt: new Date().toISOString(),
+  });
+
+  const res = await jsonFetch("/api/wallet/transactions", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.data.success, true);
+  assert.ok(Array.isArray(res.data.transactions));
+  // Un dépôt (crédit) et un paiement (débit) sont dérivés de la facture payée.
+  assert.ok(res.data.transactions.some((t) => t.reference === reference && t.direction === "credit"));
+  assert.ok(res.data.transactions.some((t) => t.reference === reference && t.direction === "debit"));
+  const credit = res.data.transactions.find((t) => t.reference === reference && t.direction === "credit");
+  assert.equal(credit.amountBtc, 2080 / 1e8);
+  assert.equal(credit.typeLabel, "Dépôt");
+});
+
 // ---------------------------------------------------------------- webhook Bitnob
 test("Webhook Bitnob signé marque la facture payée (liquidation via stub)", async () => {
   const reference = "test-ref-" + Date.now();

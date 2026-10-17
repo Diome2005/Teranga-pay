@@ -86,6 +86,23 @@ async function getLightningInvoice(id) {
   return signedRequest("GET", `/api/lightning/invoices/${id}`);
 }
 
+// GET /api/transactions — historique des transactions du compte Bitnob
+// (dépôts on-chain, retraits, transferts…). C'est la source de la page
+// « Activité récente BTC » du dashboard Bitnob.
+//   Filtres : currency (ex. "BTC"), type (DEPOSIT_CONFIRMED, WITHDRAWAL_INITIATED…),
+//   status (PENDING | IN_PROGRESS | SETTLED | FAILED | REVERSED).
+//   Pagination par curseur : repasser data.next_cursor dans `cursor`.
+async function listTransactions({ limit = 25, currency, type, status, cursor } = {}) {
+  const params = new URLSearchParams();
+  if (limit) params.set("limit", String(limit));
+  if (currency) params.set("currency", currency);
+  if (type) params.set("type", type);
+  if (status) params.set("status", status);
+  if (cursor) params.set("cursor", cursor);
+  const qs = params.toString();
+  return signedRequest("GET", `/api/transactions${qs ? `?${qs}` : ""}`);
+}
+
 // POST /api/lightning/invoices/:id/simulate-payment — (sandbox uniquement) déclenche un
 //   paiement simulé sur une facture Lightning ouverte. Provoque l'émission d'un webhook
 //   btc.lightning.received.success (~2 s) côté Bitnob, qui pilote ensuite la liquidation.
@@ -332,6 +349,7 @@ module.exports = {
   createCustomer,
   createLightningInvoice,
   getLightningInvoice,
+  listTransactions,
   simulateLightningPayment,
   verifyWebhookSignature,
   getPayoutBanks,

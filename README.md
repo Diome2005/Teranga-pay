@@ -208,6 +208,7 @@ principaux appellent `onEnterDashboard` pour basculer vers `MerchantDashboard`.
 |---|---|---|
 | GET | `/health` | sonde de santé |
 | GET | `/api/whoami` | valide les identifiants Bitnob |
+| GET | `/api/wallet/transactions` | activité récente du portefeuille BTC (`Bearer`) — proxy de `GET /api/transactions` Bitnob (`currency=BTC`) ; en `DEMO_MODE`, reconstruite depuis les factures |
 | POST | `/api/invoices` | crée client + facture Lightning (BOLT11 + QR) — **protégé `Bearer`** (marchand = session) |
 | GET | `/api/invoices` | liste des factures **du marchand connecté** (`Bearer`), filtres `merchant` / `status` |
 | GET | `/api/invoices/:id` | détail d'un lien de paiement |

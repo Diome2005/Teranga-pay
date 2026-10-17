@@ -94,6 +94,95 @@ function normalizeInvoice(entry) {
   };
 }
 
+// Libellé français du type de transaction Bitnob (page « Activité récente BTC »).
+const TX_TYPE_LABELS = {
+  DEPOSIT_CONFIRMED: "Dépôt",
+  DEPOSIT_DETECTED: "Dépôt",
+  DEPOSIT_PENDING: "Dépôt",
+  WITHDRAWAL_INITIATED: "Paiement",
+  WITHDRAWAL_FAILED: "Paiement",
+  WITHDRAWAL_SUCCESS: "Paiement",
+  P2P_TRANSFER: "Transfert",
+  SWAP_INTERNAL: "Échange",
+  FX_REBALANCING: "Conversion",
+  FEE_ONLY: "Frais",
+  REVERSAL: "Annulation",
+};
+
+// Normalise une transaction Bitnob (GET /api/transactions) vers la forme
+// attendue par le volet « Activité récente BTC » du dashboard.
+//   `amount` Bitnob est en plus petite unité (satoshi pour BTC) ; négatif = débit.
+function normalizeTransaction(tx) {
+  if (!tx) return null;
+  const type = String(tx.type || "").toUpperCase();
+  const side = String(tx.side || "").toLowerCase();
+  const credit = side === "credit" || type.startsWith("DEPOSIT");
+  const sats = Math.abs(Number(tx.amount || 0));
+  const metadata = tx.metadata || {};
+  return {
+    id: tx.transaction_id || tx.reference || "",
+    date: tx.created_at || tx.value_date || null,
+    description: metadata.description || tx.description || tx.reference || "",
+    typeLabel: TX_TYPE_LABELS[type] || (credit ? "Dépôt" : "Paiement"),
+    direction: credit ? "credit" : "debit",
+    amountSat: sats,
+    amountBtc: sats / 1e8,
+    state: String(tx.state || "").toUpperCase(),
+    currency: tx.currency || "BTC",
+    reference: tx.reference || "",
+    txHash: metadata.tx_hash || metadata.transaction_hash || tx.tx_hash || tx.reference || "",
+  };
+}
+
+// [DEMO] : reconstruit une activité BTC crédible à partir des factures du
+// marchand — un dépôt à la confirmation du paiement Lightning, un paiement à
+// la liquidation Mobile Money. Aucun appel Bitnob (DEMO_MODE=true).
+function demoSandboxTransactions(sessionPhone) {
+  const target = sessionPhone.length > 9 ? sessionPhone.slice(-9) : sessionPhone;
+  const mine = [...invoicesStore.values()].filter((entry) => {
+    if (!target) return true;
+    return String(entry.merchantPhone || "")
+      .replace(/\D/g, "")
+      .endsWith(target);
+  });
+
+  const txs = [];
+  for (const entry of mine) {
+    if ((entry.status || "pending") !== "paid") continue;
+    const sats = Number(entry.amountSat || xofToSat(entry.amountXOF || 0));
+    const date = entry.paidAt || entry.createdAt;
+    const lbl = PROVIDER_LABELS[String(entry.provider || "").toLowerCase()] || "Mobile Money";
+    txs.push({
+      id: `${entry.reference}-in`,
+      date,
+      description: entry.description || "Encaissement Lightning",
+      typeLabel: "Dépôt",
+      direction: "credit",
+      amountSat: sats,
+      amountBtc: sats / 1e8,
+      state: "SETTLED",
+      currency: "BTC",
+      reference: entry.reference,
+      txHash: entry.paymentHash || entry.reference,
+    });
+    txs.push({
+      id: `${entry.reference}-out`,
+      date,
+      description: `Paiement ${lbl}`,
+      typeLabel: "Paiement",
+      direction: "debit",
+      amountSat: sats,
+      amountBtc: sats / 1e8,
+      state: "SETTLED",
+      currency: "BTC",
+      reference: entry.reference,
+      txHash: entry.payoutId || entry.reference,
+    });
+  }
+  txs.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  return txs;
+}
+
 // Recherche une facture par reference, id interne, invoiceId Bitnob ou
 // payment_hash (le checkout reçoit l'id du lien de paiement).
 function findInvoice(idOrRef) {
@@ -311,6 +400,39 @@ app.get("/api/whoami", async (req, res) => {
       `[teranga-pay] Bitnob whoami ERREUR (${status}) :`,
       JSON.stringify(details)
     );
+    res.status(status).json({ success: false, status, error: details });
+  }
+});
+
+// GET /api/wallet/transactions — activité récente du portefeuille BTC du marchand.
+// Proxy signé vers GET /api/transactions de Bitnob (currency=BTC), normalisé pour
+// le volet « Activité récente BTC ». Requiert Authorization: Bearer <token>.
+//   Query optionnel : limit (défaut 25, max 100).
+// En DEMO_MODE : l'activité est reconstruite à partir des factures du marchand.
+app.get("/api/wallet/transactions", requireMerchant, async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 25, 100);
+  const sessionPhone = String(req.session.phone || "").replace(/\D/g, "");
+
+  if (process.env.DEMO_MODE === "true") {
+    return res.json({
+      success: true,
+      demo: true,
+      transactions: demoSandboxTransactions(sessionPhone),
+    });
+  }
+
+  try {
+    const data = await bitnob.listTransactions({ limit, currency: "BTC" });
+    const raw = data?.data?.transactions || [];
+    res.json({
+      success: true,
+      demo: false,
+      nextCursor: data?.data?.next_cursor || "",
+      transactions: raw.map(normalizeTransaction).filter(Boolean),
+    });
+  } catch (error) {
+    const { status, details } = bitnobError(error);
+    console.error(`[teranga-pay] Bitnob transactions ERREUR (${status}) :`, JSON.stringify(details));
     res.status(status).json({ success: false, status, error: details });
   }
 });
