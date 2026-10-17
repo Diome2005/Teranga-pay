@@ -76,13 +76,40 @@ Pour une démo c'est acceptable ; pour persister, ajouter un **Render Disk** mon
 
 ---
 
-## Alternative : frontend sur Vercel
+## Options d'hébergement (combinaisons possibles)
 
-Le backend reste sur Render ; le frontend peut partir sur [Vercel](https://vercel.com) :
+| Backend | Frontend | Fichiers fournis |
+|---|---|---|
+| **Render** (Web Service) | **Render** (Static Site) | [`render.yaml`](render.yaml) |
+| **Railway** | **Vercel** | [`backend/railway.json`](backend/railway.json) + [`frontend/vercel.json`](frontend/vercel.json) |
+| **Railway** | **Railway** (Static) | [`backend/railway.json`](backend/railway.json) |
 
-1. **New Project** → importer le dépôt.
-2. **Root Directory** : `frontend` · **Framework** : Vite.
-3. Variable d'environnement : `VITE_API_URL = https://teranga-pay-backend.onrender.com/api`.
-4. Deploy.
+Peu importe la combinaison, le principe reste le même :
+- **backend** : `npm install` puis `npm start`, sonde `/health`, variables Bitnob (ou démo) ;
+- **frontend** : `npm install && npm run build`, publier `dist/`, et `VITE_API_URL = <URL-backend>/api`.
 
-Un fallback SPA est déjà fourni (`frontend/public/_redirects`).
+---
+
+### Backend sur Railway
+
+1. [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo** → dépôt **Teranga-Pay**.
+2. Service → **Settings → Root Directory** : `backend`.
+3. Railway détecte Node via [`backend/railway.json`](backend/railway.json) (build `npm install`,
+   start `npm start`, healthcheck `/health`).
+4. **Variables** : ajouter `DEMO_MODE=true` (démo) puis les clés Bitnob/Stripe si besoin,
+   ainsi que `FRONTEND_URL`, `PUBLIC_URL`, `PAYOUT_CALLBACK_URL`.
+5. **Settings → Networking → Generate Domain** → noter l'URL publique
+   (`https://<service>.up.railway.app`).
+
+> Railway injecte `PORT` automatiquement — `server.js` le lit déjà (`process.env.PORT`).
+> Le disque est aussi éphémère sans **Volume** monté sur `backend/data`.
+
+### Frontend sur Vercel
+
+1. [vercel.com](https://vercel.com) → **Add New → Project** → importer le dépôt.
+2. **Root Directory** : `frontend` (Framework : Vite, détecté).
+3. **Environment Variables** : `VITE_API_URL = https://<backend>/api`.
+4. **Deploy**.
+
+Vercel lit [`frontend/vercel.json`](frontend/vercel.json) (build `npm run build`, sortie `dist`,
+rewrite SPA `/* → /index.html`). Le fallback `frontend/public/_redirects` couvre Netlify/Render.
