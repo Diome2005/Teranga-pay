@@ -7,8 +7,7 @@
 // [ÉTAPE 5] : liquidation Mobile Money — à la réception de
 //   btc.lightning.received.success, payout FCFA automatique vers le numéro
 //   du marchand (Wave / Orange Money / Free Money) via le flux payouts Bitnob.
-// [ÉTAPE 6] : persistance (store JSON), auth passwordless (OTP) et paiement
-//   par carte (Stripe Checkout) en alternative au Lightning.
+// [ÉTAPE 6] : persistance (store JSON) et auth passwordless (OTP).
 
 require("dotenv").config();
 const crypto = require("crypto");
@@ -16,7 +15,6 @@ const express = require("express");
 const cors = require("cors");
 const QRCode = require("qrcode");
 const bitnob = require("./services/bitnobService");
-const stripe = require("./services/stripe");
 const auth = require("./services/auth");
 const store = require("./services/store");
 
@@ -174,19 +172,6 @@ async function liquidateMerchantPayout(event) {
   entry.payoutStatus = "processing";
   const phone = toInternationalPhone(entry.merchantPhone);
 
-  // Mode démo : on simule le payout sans débiter le wallet Bitnob.
-  if (process.env.DEMO_MODE === "true") {
-    console.log("=========================================================");
-    console.log("[teranga-pay] LIQUIDATION FCFA SIMULÉE (DEMO_MODE=true)");
-    console.log(`  facture      : ${reference}`);
-    console.log(`  destinataire : ${phone} (${entry.provider || "wave"})`);
-    console.log(`  montant      : ${entry.amountXOF} FCFA`);
-    console.log("=========================================================");
-    entry.payoutStatus = "simulated";
-    invoicesStore.set(entry.reference, entry);
-    return;
-  }
-
   try {
     console.log(
       `[teranga-pay] Liquidation ${reference} : ${entry.amountXOF} FCFA -> ${phone} (${entry.provider})…`
@@ -241,7 +226,7 @@ app.get("/health", (req, res) => {
 });
 
 // Marque une facture comme payée (idempotent) et déclenche la liquidation.
-// Source : webhook Bitnob, polling de statut ou paiement simulé (démo).
+// Source : webhook Bitnob, polling de statut ou encaissement sandbox /simulate-card.
 function markInvoicePaid(entry, source = "interne") {
   if (!entry) return false;
   if (entry.status === "paid") return false;
@@ -541,10 +526,8 @@ app.get("/api/invoices/:id/status", async (req, res) => {
 });
 
 // POST /api/invoices/:id/simulate-card — encaissement simulé (sans carte réelle).
-//   - DEMO_MODE=true  : marque la facture payée localement + liquidation simulée.
-//   - Sinon (sandbox avec clés réelles) : appelle l'endpoint sandbox Bitnob
-//     POST /api/lightning/invoices/:id/simulate-payment, qui déclenche un vrai
-//     webhook btc.lightning.received.success -> liquidation FCFA réelle.
+//   Appelle l'endpoint sandbox Bitnob POST /api/lightning/invoices/:id/simulate-payment,
+//   qui déclenche un vrai webhook btc.lightning.received.success -> liquidation FCFA réelle.
 app.post("/api/invoices/:id/simulate-card", async (req, res) => {
   const entry = findInvoice(req.params.id);
   if (!entry) {
@@ -556,13 +539,6 @@ app.post("/api/invoices/:id/simulate-card", async (req, res) => {
     return res.status(409).json({ success: false, error: "Cette facture est déjà payée." });
   }
 
-  // Mode démo : simulation locale (aucune requête réseau).
-  if (process.env.DEMO_MODE === "true") {
-    markInvoicePaid(entry, "simulate-card");
-    return res.json({ success: true, ...normalizeInvoice(entry) });
-  }
-
-  // Mode réel (sandbox) : déclencher un vrai paiement simulé côté Bitnob.
   if (!entry.invoiceId) {
     return res.status(400).json({
       success: false,
@@ -747,109 +723,12 @@ app.put("/api/merchants/me", requireMerchant, (req, res) => {
   res.json({ success: true, merchant: updated });
 });
 
-// ==================================================================
-// [ÉTAPE 6] — Paiement par carte (Stripe Checkout) en alternative au Lightning
-// ==================================================================
-
-// POST /api/invoices/:id/card — crée une session Stripe Checkout pour cette facture.
-// Body optionnel : { returnUrl } (sinon PUBLIC_URL / ?pay=<ref>).
-app.post("/api/invoices/:id/card", async (req, res) => {
-  if (!stripe.isConfigured()) {
-    return res.status(503).json({
-      success: false,
-      error: "Paiement carte indisponible : Stripe non configuré (STRIPE_SECRET_KEY manquant).",
-    });
-  }
-
-  const entry = findInvoice(req.params.id);
-  if (!entry) {
-    return res.status(404).json({ success: false, error: `Facture "${req.params.id}" introuvable.` });
-  }
-  if (entry.status === "paid") {
-    return res.status(409).json({ success: false, error: "Cette facture est déjà payée." });
-  }
-
-  const base = req.body?.returnUrl || process.env.PUBLIC_URL || "";
-  const successUrl = `${base}/?pay=${entry.reference}&paid=1`;
-  const cancelUrl = `${base}/?pay=${entry.reference}`;
-
-  try {
-    const session = await stripe.createCheckoutSession({
-      amount: entry.amountXOF,
-      description: entry.description,
-      reference: entry.reference,
-      successUrl,
-      cancelUrl,
-      metadata: { reference: entry.reference, invoiceId: String(entry.invoiceId || entry.reference) },
-    });
-    res.status(201).json({
-      success: true,
-      provider: "stripe",
-      sessionId: session.id,
-      checkoutUrl: session.url,
-      amountTotal: session.amountTotal,
-      currency: session.currency,
-    });
-  } catch (error) {
-    const status = error.response?.status || 500;
-    const details = error.response?.data || { message: error.message };
-    console.error(`[teranga-pay] Stripe checkout ERREUR (${status}) :`, JSON.stringify(details));
-    res.status(status).json({ success: false, status, error: details });
-  }
-});
-
-// POST /api/webhooks/stripe — reçoit checkout.session.completed et marque la facture payée.
-// Sécurité : signature `t=...,v1=...` vérifiée avec STRIPE_WEBHOOK_SECRET.
-// (Le corps brut est conservé via express.json({ verify }) pour la vérification.)
-app.post("/api/webhooks/stripe", (req, res) => {
-  const signature = req.get("stripe-signature");
-  const rawBody = req.rawBody ? req.rawBody.toString("utf8") : "";
-
-  const verified = stripe.verifyWebhookSignature(rawBody, signature);
-  if (verified === null) {
-    console.warn("[teranga-pay] STRIPE_WEBHOOK_SECRET absent — signature NON vérifiée (mode dev).");
-  } else if (verified === false) {
-    console.warn("[teranga-pay] Webhook Stripe REJETÉ : signature invalide.");
-    return res.status(401).json({ success: false, error: "Invalid signature" });
-  }
-
-  const event = req.body || {};
-  const type = event.type || "unknown";
-  const obj = event.data?.object || {};
-  const reference = obj.client_reference_id || obj.metadata?.reference || null;
-
-  // Toujours répondre 200 pour éviter les renvois Stripe.
-  res.status(200).json({ success: true, received: true });
-
-  if (type === "checkout.session.completed") {
-    console.log("======================================================");
-    console.log("[teranga-pay] PAIEMENT CARTE CONFIRMÉ (Stripe) ✅");
-    console.log(`  type        : ${type}`);
-    console.log(`  reference   : ${reference}`);
-    console.log(`  montant     : ${obj.amount_total} ${obj.currency}`);
-    console.log("======================================================");
-    const entry = reference ? findInvoice(reference) : null;
-    markInvoicePaid(entry, "stripe-card");
-  } else {
-    console.log(`[teranga-pay] Webhook Stripe reçu (type="${type}")`);
-  }
-});
-
 const PORT = process.env.PORT || 5000;
 
 // [ÉTAPE 6] Exécution directe => on écoute. Import (tests) => on exporte l'app sans écouter.
 if (require.main === module) {
-  // [GARDE-FOU] en production, DEMO_MODE=true est refusé : le mode démo simule
-  // factures et payouts sans transfert réel de fonds — dangereux en prod.
-  if (process.env.NODE_ENV === "production" && process.env.DEMO_MODE === "true") {
-    console.error("[teranga-pay] REFUS DE DÉMARRER : DEMO_MODE=true est interdit en production.");
-    console.error("[teranga-pay] Positionnez DEMO_MODE=false pour servir de vrais paiements.");
-    process.exit(1);
-  }
-
   app.listen(PORT, () => {
     console.log(`[teranga-pay] Serveur backend démarré sur http://localhost:${PORT}`);
-    console.log(`[teranga-pay] Mode : DEMO_MODE=${process.env.DEMO_MODE} · Stripe=${stripe.isConfigured() ? "configuré" : "non configuré"}`);
     // Nettoyage périodique des OTP / sessions expirés (toutes les 5 min).
     setInterval(() => {
       try {

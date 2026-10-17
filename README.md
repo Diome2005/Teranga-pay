@@ -4,8 +4,8 @@ PSP marchand pour la diaspora sénégalaise : le client règle en **Bitcoin Ligh
 marchand reçoit en **FCFA** sur son compte **Mobile Money** (Wave / Orange Money / Free Money).
 
 > Statut : l'ensemble du travail (backend + frontend + landing page) est **fusionné dans `main`**
-> et fonctionnel en **mode démo** (`DEMO_MODE=true`). La mise en production reste conditionnée à
-> la confirmation des points Bitnob listés dans [À faire par l'équipe](#à-faire-par-léquipe).
+> et branché uniquement sur les vraies APIs (Bitnob sandbox). La mise en production
+> reste conditionnée à la confirmation des points Bitnob listés dans [À faire par l'équipe](#à-faire-par-léquipe).
 
 ---
 
@@ -25,14 +25,13 @@ Le projet se compose de deux applications :
   Lightning + payouts Mobile Money) ;
 - un **frontend** React/Vite avec trois parcours : page d'accueil publique, **dashboard
   marchand** (connexion passwordless par OTP, création/partage de liens) et **page de
-  paiement client** (QR Lightning + paiement par carte).
+  paiement client** (QR Lightning).
 
 ### Comment ça marche
 
 1. Le **marchand** se connecte (OTP sur son numéro Mobile Money) et crée un **lien de paiement**
    pour un montant en FCFA.
-2. Le client ouvre le lien et scanne une **facture Lightning** (BOLT11 + QR), ou règle par
-   **carte bancaire** (Stripe Checkout).
+2. Le client ouvre le lien et scanne une **facture Lightning** (BOLT11 + QR).
 3. Bitnob confirme le paiement via **webhook** ; la facture passe en *payée*.
 4. Teranga Pay **liquide** automatiquement le montant en FCFA vers le Mobile Money du
    marchand (Wave / Orange Money / Free Money). Le dénouement du payout est aussi remonté
@@ -43,12 +42,11 @@ Le montant FCFA demandé au client est converti en satoshis (taux configurable, 
 ### Fonctionnalités clés
 
 - Création / listing / consultation de liens de paiement (factures Lightning BOLT11 + QR).
-- Paiement client en Lightning **ou** par carte (Stripe Checkout + Apple Pay).
-- Webhooks Bitnob (paiement confirmé, cycle de vie des payouts) et Stripe (carte), signés.
+- Paiement client en **Bitcoin Lightning** (QR BOLT11).
+- Webhooks Bitnob (paiement confirmé, cycle de vie des payouts), signés.
 - Liquidation automatique en FCFA vers Wave / Orange Money / Free Money (payouts Bitnob).
 - Authentification marchand **passwordless** (OTP SMS / WhatsApp + sessions).
-- Persistance fichier (registres JSON) et **mode démo** (`DEMO_MODE=true`) pour tester sans
-  aucune clé réelle.
+- Persistance fichier (registres JSON) : factures, comptes marchands, sessions et codes OTP.
 
 ---
 
@@ -56,7 +54,7 @@ Le montant FCFA demandé au client est converti en satoshis (taux configurable, 
 
 - **Node.js 18+** (utilise `fetch` global et le test runner natif `node --test`).
 - **npm** (fourni avec Node.js).
-- *(optionnel)* Compte **Bitnob** (sandbox) et **Stripe** pour les paiements réels.
+- *(optionnel)* Compte **Bitnob** (sandbox) pour les paiements réels.
 - *(optionnel)* **ngrok** pour exposer les webhooks en local.
 
 ---
@@ -75,8 +73,8 @@ copy .env.example .env     # Windows (ou : cp .env.example .env)
 npm run dev               # démarre l'API sur http://localhost:5000
 ```
 
-Par défaut `DEMO_MODE=true` : les paiements et liquidations sont **simulés**, aucune clé
-Bitnob/Stripe n'est nécessaire pour tester le parcours.
+Renseigner les clés **Bitnob** (sandbox) dans `.env` pour le
+parcours réel ; `npm test` fonctionne sans aucune clé grâce à un stub HTTP local.
 
 ### 2. Frontend (interface — port 5173)
 
@@ -93,7 +91,7 @@ laisser `VITE_API_URL` vide.
 ### 3. Utilisation
 
 - Ouvrir **http://localhost:5173** → page d'accueil.
-- « Accéder au Dashboard » → connexion marchand par OTP (en mode démo, le code est affiché).
+- « Accéder au Dashboard » → connexion marchand par OTP (sans prestataire SMS configuré, le code est journalisé dans la console du backend).
 - Créer un lien de paiement, puis ouvrir le guichet client (`/?pay=<id>`).
 
 ### Commandes utiles
@@ -101,8 +99,7 @@ laisser `VITE_API_URL` vide.
 | Dossier | Commande | Rôle |
 |---|---|---|
 | `backend` | `npm run dev` | API en rechargement auto (http://localhost:5000) |
-| `backend` | `npm test` | tests e2e (santé, OTP, webhooks, payouts, Stripe) |
-| `backend` | `npm run demo` | scénario de démonstration bout-en-bout |
+| `backend` | `npm test` | tests e2e hors-ligne via stub Bitnob (santé, comptes, OTP, webhooks, payouts) |
 | `frontend` | `npm run dev` | interface Vite (http://localhost:5173) |
 | `frontend` | `npm run build` | build de production |
 
@@ -132,12 +129,10 @@ teranga-pay/
 │   │   ├── bitnobService.js      # API Bitnob : auth HMAC, invoices, payouts (réalisé)
 │   │   ├── store.js              # persistance JSON fichier (réalisé)
 │   │   ├── auth.js               # auth passwordless : OTP + sessions (réalisé)
-│   │   ├── sms.js                # envoi OTP SMS/WhatsApp (Twilio / Cloud API) (réalisé)
-│   │   └── stripe.js             # paiement carte : Stripe Checkout + webhook (réalisé)
-│   ├── scripts/
-│   │   └── demo-e2e.js           # scénario de démonstration bout-en-bout (npm run demo)
+│   │   └── sms.js                # envoi OTP SMS/WhatsApp (Twilio / Cloud API) (réalisé)
 │   └── test/
-│       └── server.test.js        # tests e2e (npm test)
+│       ├── server.test.js        # tests e2e hors-ligne (npm test)
+│       └── bitnobStub.js         # stub HTTP de l'API Bitnob pour les tests
 └── frontend/
     ├── .env.example
     ├── package.json
@@ -217,7 +212,7 @@ principaux appellent `onEnterDashboard` pour basculer vers `MerchantDashboard`.
 | GET | `/api/invoices` | liste des factures **du marchand connecté** (`Bearer`), filtres `merchant` / `status` |
 | GET | `/api/invoices/:id` | détail d'un lien de paiement |
 | GET | `/api/invoices/:id/status` | polling du statut (confirmé via Bitnob) |
-| POST | `/api/invoices/:id/simulate-card` | (démo) encaissement sans paiement réel |
+| POST | `/api/invoices/:id/simulate-card` | encaissement simulé côté Bitnob sandbox (valide la chaîne webhook → payout) |
 | POST | `/api/webhooks/bitnob` | webhook signé : `btc.lightning.received.success` → liquidation FCFA ; `payouts.withdrawal.success` / `.expired` → statut du payout |
 | GET | `/api/webhooks/bitnob` | sonde du tunnel ngrok |
 | POST | `/api/auth/register` | crée un compte marchand (email + mot de passe) → jeton de session |
@@ -226,37 +221,24 @@ principaux appellent `onEnterDashboard` pour basculer vers `MerchantDashboard`.
 | POST | `/api/auth/otp/verify` | vérifie le code → jeton de session |
 | GET | `/api/merchants/me` | profil marchand (protégé `Bearer`) |
 | PUT | `/api/merchants/me` | met à jour le profil (ex. `{ shop }`) |
-| POST | `/api/invoices/:id/card` | crée une session Stripe Checkout (carte / Apple Pay) |
-| POST | `/api/webhooks/stripe` | webhook Stripe signé → facture payée |
 
 Lancer + tester le backend (voir aussi [Installation & lancement](#installation--lancement)) :
 
 ```bash
 cd backend
-npm test        # tests e2e (santé, comptes, OTP, webhooks signés, payouts, Stripe)
-npm run demo    # scénario de démonstration bout-en-bout (jury)
+npm test        # tests e2e hors-ligne via stub Bitnob (santé, comptes, OTP, webhooks signés, payouts)
 ```
 
 ---
 
-## Démonstration de bout en bout (jury)
+## Validation réelle (sandbox Bitnob)
 
-`npm run demo` (backend) démarre le serveur avec un registre temporaire en `DEMO_MODE` et
-joue le parcours complet **sans dépendre de Bitnob / Stripe / ngrok** :
+Plus aucun mode démo : le parcours complet se valide contre le **sandbox Bitnob** en suivant
+**[`VALIDATION-SANDBOX-BITNOB.md`](VALIDATION-SANDBOX-BITNOB.md)** (whoami → facture réelle →
+`simulate-card` → webhook → payout FCFA).
 
-1. **Santé** — `GET /health`.
-2. **Connexion marchand passwordless** — OTP (`/api/auth/otp` → `/verify`) puis profil protégé.
-3. **Création d'une facture** — lien de paiement (facture injectée dans le registre).
-4. **Paiement Lightning** — webhook signé `btc.lightning.received.success` → facture **payée**
-   + liquidation FCFA **simulée** vers Wave.
-5. **Dénouement du payout** — webhook `payouts.withdrawal.success` → payout `completed`.
-6. **Paiement carte (démo)** — `POST /invoices/:id/simulate-card` → facture payée.
-
-Sortie : un récapitulatif `OK`/`KO` par étape, code de sortie 0 si tout passe. Le script
-`backend/scripts/demo-e2e.js` peut servir de trame au scénario présenté au jury.
-
-> En complément : le **frontend** peut être démontré sans backend (repli mode démo intégré à
-> `CheckoutPage` / `MerchantDashboard`), et avec backend via le proxy Vite `npm run dev`.
+`npm test` (backend) couvre le même parcours **hors-ligne** via un stub HTTP local
+(`backend/test/bitnobStub.js`) qui imite l'API Bitnob : aucune clé, aucun réseau externe.
 
 ---
 
@@ -264,7 +246,7 @@ Sortie : un récapitulatif `OK`/`KO` par étape, code de sortie 0 si tout passe.
 
 L'envoi réel est branché dans `backend/services/auth.js` via `backend/services/sms.js` :
 le premier prestataire configuré est utilisé, sinon le code est **journalisé côté serveur**
-(dev / démo). En `DEMO_MODE=true`, le code est aussi renvoyé dans la réponse HTTP (`demoCode`).
+(dev uniquement). Le code n'est **jamais renvoyé** dans la réponse HTTP.
 
 | Prestataire | Variables d'environnement |
 |---|---|
@@ -302,10 +284,10 @@ liste ne renvoie que les factures du marchand connecté.
 - ~~Persistance (registres factures/OTP/sessions persistants)~~ ✅ **fait** (JSON fichier, `services/store.js`)
 - ~~Auth passwordless (OTP)~~ ✅ **fait** (`services/auth.js`) + envoi SMS/WhatsApp réel (`services/sms.js`)
 - ~~Auth marchand email + mot de passe (scrypt) + factures scopées au compte~~ ✅ **fait** (`accounts` dans `services/auth.js`, `requireMerchant` sur `POST`/`GET /api/invoices`)
-- ~~Paiement carte (Stripe Checkout + webhook)~~ ✅ **fait** (`services/stripe.js`) — renseigner `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
-- ~~Frontend : brancher `CheckoutPage` / `MerchantDashboard` sur les routes OTP et carte~~ ✅ **fait** (helpers `services/api.js`, y compris `PUT /merchants/me`)
-- ~~Flux de bout en bout : lien marchand → paiement Lightning / carte → webhook → payout FCFA~~ ✅ **fait** (`npm run demo`)
-- ~~Scénario de démonstration de bout en bout pour le jury~~ ✅ **fait** (`scripts/demo-e2e.js`)
+- ~~Paiement carte bancaire (checkout hébergé + webhook)~~ ❌ **retiré** — encaissement uniquement en Bitcoin Lightning
+- ~~Frontend : brancher `CheckoutPage` / `MerchantDashboard` sur les routes OTP~~ ✅ **fait** (helpers `services/api.js`, y compris `PUT /merchants/me`)
+- ~~Flux de bout en bout : lien marchand → paiement Lightning → webhook → payout FCFA~~ ✅ **fait** (tests `npm test` via stub Bitnob + checklist sandbox)
+- ~~Suppression totale du mode démo (backend, frontend, scripts) : tout passe par les vraies APIs~~ ✅ **fait**
 - ~~Fusion dans `main` (backend + frontend + landing page)~~ ✅ **fait**
 
 ### À confirmer avant mise en production (bloquant)
@@ -321,24 +303,30 @@ Validé contre la doc officielle (docs.bitnob.com) :
   du corps, en-tête `x-bitnob-signature`. Payouts : `payouts.withdrawal.success` / `.expired`
   (plus `payouts.initialized` / `payouts.processing`, non terminaux, à ignorer).
 
-Reste à confirmer (nécessite le sandbox / des identifiants) :
+Validé contre le sandbox Bitnob (2026-10-17) :
 
-- **Codes réseau Mobile Money Sénégal** : `MOBILE_MONEY_NETWORKS` (wave/orange/free) est un
-  placeholder — récupérer les valeurs exactes via `GET /api/payouts/supported-countries/SN`
-  et `GET /api/payouts/banks/SN`.
-- **Champ bénéficiaire mobile money** : la doc cite à la fois `network` et `bank_code` pour
-  `mobile_money` — confirmer lequel attend `initialize` via `supported-countries/SN` (source de vérité).
+- ✅ **`whoami`** : 200, `environment: "sandbox"` — signature HMAC sortante conforme.
+- ✅ **Facture Lightning réelle** : BOLT11 `lntb…` (testnet sandbox) généré via `/api/lightning/invoices`.
+- ✅ **Codes réseau Mobile Money SN** : `orange` / `free` / `expresso` / `wave`
+  (`GET /api/payouts/supported-countries/SN`) — `MOBILE_MONEY_NETWORKS` corrigé en conséquence.
+- ✅ **Champ bénéficiaire** : `network` (+ `account_name`, `account_number` et groupe `sender`
+  requis) — `bank_code` ne s'applique pas au mobile money.
+- ✅ **Chaîne payout réelle** : quote → initialize → finalize acceptés (statut `PENDING`,
+  `sandbox_txn_…`) ; `simulate-payment` accepté → facture passée `paid`.
+
+Reste à confirmer :
+
+- **Flux complet avec webhook** : `POST /api/lightning/invoices/:id/simulate-payment` déclenche un
+  vrai webhook `btc.lightning.received.success` — à rejouer avec ngrok + serveur local
+  (voir la checklist).
 - **Déduplication webhook** : la doc recommande de dédupliquer sur `event_id` (payload + header
   `x-bitnob-event-id`) ; aujourd'hui l'idempotence est assurée par les gardes de statut.
-- **Test sandbox réel** : `POST /api/lightning/invoices/:id/simulate-payment` (ou `auto_settle:true`)
-  déclenche un vrai webhook `btc.lightning.received.success` — à utiliser pour valider le flux de bout en bout.
 
 > Procédure de validation pas à pas (whoami → facture réelle → webhook → payout, avec les
 > correctifs à appliquer selon les réponses du sandbox) : **[`VALIDATION-SANDBOX-BITNOB.md`](VALIDATION-SANDBOX-BITNOB.md)**.
 
 ### Améliorations optionnelles
 
-- Garde-fou production : refuser `DEMO_MODE=true` si `NODE_ENV=production`.
 - Exposer les webhooks via ngrok (`PUBLIC_URL` / `callback_url`) pour les tests réels.
 - Remplacer le store JSON par une vraie base (Postgres/SQLite) si besoin — même API Map-like.
 - Variables d'environnement : voir `backend/.env.example` et `frontend/.env.example`.

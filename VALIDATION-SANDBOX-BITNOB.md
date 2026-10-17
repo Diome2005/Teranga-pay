@@ -1,8 +1,14 @@
 # Validation sandbox Bitnob — checklist pas à pas
 
-Objectif : valider en ~15 min que l'intégration Bitnob fonctionne réellement (hors `DEMO_MODE`) —
+Objectif : valider en ~15 min que l'intégration Bitnob fonctionne réellement —
 authentification API, facture Lightning, webhook signé, liquidation Mobile Money — et trancher
-les 3 inconnues listées dans le README (« À confirmer avant mise en production »).
+les inconnues listées dans le README (« À confirmer avant mise en production »).
+
+> **Premiers résultats (sandbox, 2026-10-17, sans ngrok)** : `whoami` 200 ✅ ; facture réelle
+> `lntb…` créée ✅ ; codes réseau SN `orange`/`free`/`expresso`/`wave` ✅ (`MOBILE_MONEY_NETWORKS`
+> corrigé) ; simulate-payment accepté → facture `paid` ✅ ; chaîne payout réelle validée en
+> direct (quote 100 XOF → initialize `orange` + `sender` → finalize `PENDING`, `sandbox_txn_…`) ✅.
+> Restent : webhook réel via ngrok (étapes 1-5) et dédup `event_id`.
 
 > Sandbox uniquement : ne jamais utiliser de clés de production pour ces tests.
 
@@ -37,7 +43,6 @@ les 3 inconnues listées dans le README (« À confirmer avant mise en productio
 Partir de `backend/.env.example` et renseigner :
 
 ```ini
-DEMO_MODE=false
 BITNOB_BASE_URL=https://api.bitnob.com
 BITNOB_CLIENT_ID=<clé sandbox>
 BITNOB_CLIENT_SECRET=<secret sandbox>
@@ -104,19 +109,18 @@ $inv = Invoke-RestMethod -Method Post -Uri http://localhost:5000/api/invoices `
   -Body '{"amountXOF":1000,"description":"Test sandbox","provider":"wave"}'
 
 $inv.reference    # à noter pour les étapes suivantes
-$inv.bolt11       # doit être un vrai BOLT11 : commence par "lnbc" (pas "demo_")
+$inv.bolt11       # vrai BOLT11 : "lntb…" (testnet sandbox) ou "lnbc…" (mainnet)
 $inv.amountSat    # sats déduits de amountXOF via XOF_PER_BTC
 ```
 
 Contrôles :
-- L'id interne n'est **pas** préfixé `demo_` (→ vrai appel `/api/lightning/invoices`).
+- L'id interne provient d'un vrai appel `/api/lightning/invoices` (jamais généré localement).
 - `checkout_url` pointe vers le frontend (`FRONTEND_URL`).
 
 ## 5. Payer la facture (simulate-payment) et suivre le flux
 
 `POST /api/invoices/:id/simulate-card` appelle le vrai endpoint sandbox
-`/api/lightning/invoices/:id/simulate-payment` quand `DEMO_MODE=false`
-(`backend/server.js:548`).
+`/api/lightning/invoices/:id/simulate-payment` (`backend/server.js:548`).
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri "http://localhost:5000/api/invoices/<reference>/simulate-card"
@@ -139,7 +143,7 @@ Invoke-RestMethod "http://localhost:5000/api/invoices/<reference>/status"
 En cas d'échec de liquidation, `payoutStatus = "failed"` et `payoutError` contient le détail
 Bitnob (status HTTP + payload d'erreur).
 
-## 6. Trancher les 3 inconnues (sans ngrok, depuis `backend/`)
+## 6. Trancher les inconnues (sans ngrok, depuis `backend/`)
 
 ### 6a. Codes réseau Mobile Money Sénégal
 
@@ -147,8 +151,9 @@ Bitnob (status HTTP + payload d'erreur).
 node -e 'require("dotenv").config();require("./services/bitnobService").signedRequest("GET","/api/payouts/supported-countries/SN").then(r=>console.log(JSON.stringify(r,null,2))).catch(e=>console.error(e.response&&e.response.status,JSON.stringify(e.response&&e.response.data)))'
 ```
 
-Comparer les valeurs `network` autorisées au mapping actuel (`MOBILE_MONEY_NETWORKS`,
-`backend/services/bitnobService.js:157`) et corriger si besoin.
+**Résultat sandbox (2026-10-17)** : `orange` | `free` | `expresso` | `wave`. Le mapping
+`MOBILE_MONEY_NETWORKS` (`backend/services/bitnobService.js:143`) a été corrigé en conséquence
+(`orange`/`free` — et non `orange_money`/`free_money` — + `expresso`).
 
 ### 6b. Annuaire des opérateurs/banques SN
 
@@ -156,11 +161,16 @@ Comparer les valeurs `network` autorisées au mapping actuel (`MOBILE_MONEY_NETW
 node -e 'require("dotenv").config();require("./services/bitnobService").getPayoutBanks("SN").then(r=>console.log(JSON.stringify(r,null,2))).catch(e=>console.error(e.response&&e.response.status,JSON.stringify(e.response&&e.response.data)))'
 ```
 
-### 6c. Champ bénéficiaire : `network` ou `bank_code` ?
+**Résultat sandbox (2026-10-17)** : annuaire banques SN vide (`total: 0`) — attendu, les
+opérateurs mobile money se configurent via `supported-countries/SN` (étape 6a), pas via `banks`.
 
-La doc cite les deux pour `mobile_money`. La réponse de `supported-countries/SN` tranche.
-Si le sandbox exige `bank_code`, adapter le payload dans `initializePayout`
-(`backend/services/bitnobService.js:226-237`).
+### 6c. Champ bénéficiaire : `network` ou `bank_code` ? — ✅ tranché
+
+`supported-countries/SN` confirme le champ **`network`** (`orange` | `free` | `expresso` | `wave`)
+pour `mobile_money` — `bank_code` ne concerne pas ce destination type. Le groupe
+**`sender { account_name, country }` est requis** ; il est désormais envoyé par `initializePayout`
+(`backend/services/bitnobService.js:198`). Validation réelle : quote → initialize → finalize
+acceptés en direct contre le sandbox (statut `PENDING`, `provider_settlement_id: sandbox_txn_…`).
 
 ### 6d. Déduplication webhook (`event_id`)
 
@@ -174,27 +184,29 @@ Si le sandbox exige `bank_code`, adapter le payload dans `initializePayout`
 
 | Inconnue | Où dans le code | Action |
 |---|---|---|
-| Codes `network` SN | `backend/services/bitnobService.js:157` (`MOBILE_MONEY_NETWORKS`) | remplacer `wave` / `orange_money` / `free_money` par les valeurs exactes renvoyées par le sandbox |
-| `network` vs `bank_code` | `backend/services/bitnobService.js:226-237` (`initializePayout`) | renommer le champ du bénéficiaire selon la réponse du sandbox |
-| `payment_reason` SN | `backend/.env` (`PAYOUT_PAYMENT_REASON`) | si 400 « invalid payment reason », tester une autre valeur autorisée pour SN |
+| Codes `network` SN | `backend/services/bitnobService.js:143` (`MOBILE_MONEY_NETWORKS`) | ✅ fait (2026-10-17) — `orange` / `free` / `expresso` / `wave` |
+| `network` vs `bank_code` | `backend/services/bitnobService.js:198` (`initializePayout`) | ✅ fait — `network` + groupe `sender` requis |
+| `payment_reason` SN | `backend/.env` (`PAYOUT_PAYMENT_REASON`) | ✅ fait — `goods_and_services` accepté au quote/initialize (sandbox) |
 | Dédup `event_id` | `backend/server.js:600` (route webhook) | ajouter un registre `event_id` si doublons observés |
 
-Après toute correction : relancer `npm test` (backend, 17/17 attendus) puis rejouer l'étape 5.
+Après toute correction : relancer `npm test` (backend, 18/18 attendus) puis rejouer l'étape 5.
 
 ## 8. Critères de réussite
 
-- [ ] `GET /api/whoami` → 200
-- [ ] Facture créée avec un vrai `bolt11` (`lnbc…`) et un id non `demo_`
-- [ ] `simulate-card` → webhook reçu, signature validée (`WEBHOOK_DEBUG`)
-- [ ] `status = paid` et `payoutStatus = done` ; cycle final via `payouts.withdrawal.*`
-- [ ] Codes réseau SN confirmés (ou corrigés) dans `MOBILE_MONEY_NETWORKS`
-- [ ] Champ bénéficiaire confirmé (`network` vs `bank_code`)
+- [x] `GET /api/whoami` → 200 (2026-10-17)
+- [x] Facture créée avec un vrai `bolt11` (`lntb…` sandbox) via l'API Bitnob (2026-10-17)
+- [x] `simulate-payment` accepté → facture passée `paid` côté Bitnob (2026-10-17)
+- [x] Chaîne payout réelle : quote (100 XOF) → initialize → finalize → `PENDING` /
+  `sandbox_txn_…` (2026-10-17)
+- [ ] `simulate-card` → webhook reçu, signature validée (`WEBHOOK_DEBUG`) — nécessite ngrok
+- [ ] `status = paid` et `payoutStatus = done` via le flux complet de l'app (webhook)
+- [x] Codes réseau SN confirmés et corrigés dans `MOBILE_MONEY_NETWORKS`
+- [x] Champ bénéficiaire confirmé (`network` + `sender`)
 - [ ] Aucun doublon de liquidation constaté (guardes de statut suffisantes ou dédup ajoutée)
 
 ## 9. Nettoyage après validation
 
-- `WEBHOOK_DEBUG=false` et `DEMO_MODE=true` (chemin jury/démo, 100 % hors-ligne).
-- Rappel garde-fou : `NODE_ENV=production` + `DEMO_MODE=true` → le serveur refuse de démarrer.
+- `WEBHOOK_DEBUG=false`.
 - Ne jamais committer `.env` (clés sandbox incluses).
 
 ## Échecs fréquents
@@ -207,4 +219,5 @@ Après toute correction : relancer `npm test` (backend, 17/17 attendus) puis rej
 | Webhook jamais reçu | URL dashboard Bitnob obsolète | Mettre à jour l'URL ngrok dans le dashboard + `PAYOUT_CALLBACK_URL` |
 | `initialize` 400 sur `network` | Code réseau inexact | Corriger `MOBILE_MONEY_NETWORKS` (étape 6a) |
 | `initialize` 400 `payment_reason` | Valeur non autorisée pour SN | Changer `PAYOUT_PAYMENT_REASON` |
-| `payoutStatus = failed` | Wallet sandbox vide, quote expiré, bénéficiaire invalide | Lire `payoutError` via `/status` puis relancer la facture |
+| `payoutStatus = failed` avec `422 INSUFFICIENT_FUNDS` | Wallet sandbox vide | Simuler un paiement sur une facture (`simulate-payment`) pour créditer le wallet, puis relancer |
+| `payoutStatus = failed` | Quote expiré, bénéficiaire invalide, paiement lancé trop tard | Lire `payoutError` via `/status` puis relancer la facture |

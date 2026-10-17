@@ -2,8 +2,7 @@
 // [RÔLE] : authentification "sans mot de passe" du marchand (passwordless).
 // [FLUX] : numéro Mobile Money -> code OTP (TTL) -> jeton de session.
 // [SMS] : envoi réel via services/sms.js (Twilio / WhatsApp Cloud API). Sans prestataire
-//   configuré, le code est journalisé côté serveur. En DEMO_MODE=true le code est renvoyé
-//   dans la réponse pour la démonstration.
+//   configuré, le code est journalisé côté serveur (repli console).
 // [SÉCURITÉ] : limité en tentatives (MAX_ATTEMPTS) + délai de renvoi (RESEND_COOLDOWN).
 
 const crypto = require("crypto");
@@ -95,8 +94,6 @@ async function requestOtp(phoneRaw, shop) {
     delivered: delivery.ok,
     expiresIn: OTP_TTL_SECONDS,
     resendAfter: RESEND_COOLDOWN_SECONDS,
-    // En démo, on renvoie le code pour faciliter la démonstration jury.
-    demoCode: process.env.DEMO_MODE === "true" ? code : undefined,
   };
 }
 

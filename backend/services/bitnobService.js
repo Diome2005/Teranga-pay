@@ -12,10 +12,15 @@
 const crypto = require("crypto");
 const axios = require("axios");
 
-const BITNOB_BASE_URL = process.env.BITNOB_BASE_URL || "https://api.bitnob.com";
+const DEFAULT_BITNOB_BASE_URL = "https://api.bitnob.com";
 const CLIENT_ID = process.env.BITNOB_CLIENT_ID;
 const CLIENT_SECRET = process.env.BITNOB_CLIENT_SECRET;
-const DEMO_MODE = process.env.DEMO_MODE === "true";
+
+// Lue à chaque requête (et non au chargement du module) pour permettre aux tests
+// d'injecter un stub HTTP local via BITNOB_BASE_URL sans redémarrer le process.
+function baseUrl() {
+  return process.env.BITNOB_BASE_URL || DEFAULT_BITNOB_BASE_URL;
+}
 
 // Génère un nonce cryptographique de 16 octets (hex) — unicité par requête.
 function generateNonce() {
@@ -51,7 +56,7 @@ async function signedRequest(method, path, body) {
   const headers = authHeadersForPayload(payload);
   const response = await axios.request({
     method,
-    url: `${BITNOB_BASE_URL}${path}`,
+    url: `${baseUrl()}${path}`,
     headers,
     data: body ? payload : undefined,
   });
@@ -66,37 +71,18 @@ async function whoami() {
 // POST /api/customers — crée un profil client.
 // Requis : email, customer_type ('individual' | 'business').
 async function createCustomer(payload) {
-  if (DEMO_MODE) return { data: { id: `demo_customer_${crypto.randomUUID()}` } };
   return signedRequest("POST", "/api/customers", payload);
-}
-
-// [DEMO] : facture Lightning simulée (DEMO_MODE=true) — aucun appel réseau.
-// La forme imite la réponse réelle (request = BOLT11, amount_sat, status…).
-function fakeInvoice(payload) {
-  return {
-    id: `demo_${crypto.randomUUID()}`,
-    payment_hash: crypto.randomBytes(32).toString("hex"),
-    request: `lnbc${payload.amount}n1` + crypto.randomBytes(32).toString("hex"),
-    amount_sat: String(payload.amount),
-    description: payload.description || "",
-    status: "pending",
-    reference: payload.reference || "",
-    expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
-    created_at: new Date().toISOString(),
-  };
 }
 
 // POST /api/lightning/invoices — génère une facture Lightning (BOLT11).
 // Requis : amount (sats), description, reference (clé d'idempotence).
 // Optionnel : customer_id, expiry (secondes).
 async function createLightningInvoice(payload) {
-  if (DEMO_MODE) return fakeInvoice(payload);
   return signedRequest("POST", "/api/lightning/invoices", payload);
 }
 
 // GET /api/lightning/invoices/:id — détail/statut d'une facture.
 async function getLightningInvoice(id) {
-  if (DEMO_MODE) return null;
   return signedRequest("GET", `/api/lightning/invoices/${id}`);
 }
 
@@ -152,12 +138,13 @@ function verifyWebhookSignature(rawBody, signature) {
  * ================================================================== */
 
 // Mapping opérateur Mobile Money -> réseau attendu par l'API payouts.
-// Les valeurs exactes dépendent du corridor : vérifier avec
-// GET /api/payouts/supported-countries/SN (liste des `network` autorisés).
+// Valeurs confirmées le 2026-10-17 contre le sandbox :
+// GET /api/payouts/supported-countries/SN → orange | free | expresso | wave.
 const MOBILE_MONEY_NETWORKS = {
   wave: "wave",
-  orange: "orange_money",
-  free: "free_money",
+  orange: "orange",
+  free: "free",
+  expresso: "expresso",
 };
 
 // GET /api/payouts/banks/:countryCode — annuaire des opérateurs/banques d'un pays.
@@ -205,11 +192,18 @@ async function createPayoutQuote({
 
 // POST /api/payouts/:quoteId/initialize — verrouille le quote et attache le
 // bénéficiaire (ici : wallet Mobile Money — destination_type "mobile_money").
-//   beneficiary : { destination_type, country, network, account_name, account_number }
+//   Requis par supported-countries/SN : beneficiary { account_name, account_number,
+//   network } + sender { account_name, country } (champ `network`, pas `bank_code`).
 //   payment_reason : code court ("goods_and_services", "family_support"…).
 async function initializePayout(
   quoteId,
-  { reference, beneficiary, paymentReason = "goods_and_services", callbackUrl }
+  {
+    reference,
+    beneficiary,
+    sender,
+    paymentReason = "goods_and_services",
+    callbackUrl,
+  }
 ) {
   if (!quoteId) {
     throw new Error("initializePayout : le champ 'quoteId' est requis.");
@@ -233,6 +227,11 @@ async function initializePayout(
       network: beneficiary.network,
       account_name: beneficiary.account_name || "Marchand Teranga",
       account_number: beneficiary.account_number,
+      // Requis par l'API (supported-countries/SN) : identité de l'expéditeur.
+      sender: {
+        account_name: sender?.account_name || "Teranga Pay",
+        country: sender?.country || "SN",
+      },
     },
   };
   if (callbackUrl) payload.callback_url = callbackUrl;
@@ -256,7 +255,7 @@ async function finalizePayout(quoteId) {
 }
 
 // Enchaîne les 3 étapes du payout Mobile Money.
-//   `provider` : identifiant opérateur côté produit ("wave" | "orange" | "free").
+//   `provider` : identifiant opérateur côté produit ("wave" | "orange" | "free" | "expresso").
 //   Le mapping vers le `network` Bitnob est fait via MOBILE_MONEY_NETWORKS ;
 //   `network` passé explicitement surcharge ce mapping.
 //   Retourne l'objet payout finalisé (statut PENDING — le dénouement arrive
@@ -271,6 +270,7 @@ async function sendMobileMoneyPayout({
   country = "SN",
   toCurrency = "XOF",
   reference,
+  sender,
   paymentReason,
   callbackUrl,
 }) {
@@ -282,7 +282,7 @@ async function sendMobileMoneyPayout({
     network || MOBILE_MONEY_NETWORKS[String(provider || "").toLowerCase()] || null;
   if (!resolvedNetwork) {
     throw new Error(
-      `sendMobileMoneyPayout : réseau inconnu pour provider="${provider}" — utilisez wave, orange ou free.`
+      `sendMobileMoneyPayout : réseau inconnu pour provider="${provider}" — utilisez wave, orange, free ou expresso.`
     );
   }
 
@@ -302,6 +302,7 @@ async function sendMobileMoneyPayout({
   // 2. Initialize — attache le wallet Mobile Money du marchand.
   const initiated = await initializePayout(quoteId, {
     reference,
+    sender,
     paymentReason,
     callbackUrl,
     beneficiary: {
@@ -320,7 +321,8 @@ async function sendMobileMoneyPayout({
 }
 
 module.exports = {
-  BITNOB_BASE_URL,
+  DEFAULT_BITNOB_BASE_URL,
+  baseUrl,
   MOBILE_MONEY_NETWORKS,
   generateNonce,
   buildSignature,

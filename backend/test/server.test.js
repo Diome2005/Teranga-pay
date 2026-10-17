@@ -1,16 +1,13 @@
 // [FICHIER] : backend/test/server.test.js
-// [RÔLE] : tests de bout en bout du backend (santé, auth OTP, webhooks signés, carte).
+// [RÔLE] : tests de bout en bout du backend (santé, auth OTP, webhooks signés).
 // [EXÉCUTION] : `npm test` (node --test). Aucun service externe requis : le store est
-//   isolé dans un dossier temporaire et le mode démo est forcé pour la liquidation.
+//   isolé dans un dossier temporaire et un stub HTTP local remplace l'API Bitnob
+//   (BITNOB_BASE_URL injecté dans before(), lu à chaque requête par bitnobService).
 
 process.env.DATA_DIR = require("os").tmpdir() + require("path").sep + "teranga-test-" + Date.now();
-process.env.DEMO_MODE = "true";
+process.env.BITNOB_CLIENT_ID = "test_client_id";
 process.env.BITNOB_WEBHOOK_SECRET = "test_bitnob_secret";
 process.env.BITNOB_CLIENT_SECRET = "test_bitnob_client_secret";
-process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_secret";
-// Chaîne vide (et non suppression) : dotenv ne réécrit pas une clé déjà présente,
-// ce qui force bien le service carte "non configuré" pour le test 503.
-process.env.STRIPE_SECRET_KEY = "";
 
 const { test, before, after } = require("node:test");
 const assert = require("node:assert/strict");
@@ -18,12 +15,18 @@ const crypto = require("node:crypto");
 
 const app = require("../server");
 const store = require("../services/store");
-const stripe = require("../services/stripe");
+const bitnobStub = require("./bitnobStub");
 
 let server;
+let stubServer;
 let base;
 
 before(async () => {
+  // Stub Bitnob local : bitnobService lit BITNOB_BASE_URL à chaque requête (baseUrl()).
+  stubServer = bitnobStub.start();
+  await new Promise((r) => stubServer.listen(0, r));
+  process.env.BITNOB_BASE_URL = `http://127.0.0.1:${stubServer.address().port}`;
+
   server = app.listen(0);
   await new Promise((r) => server.once("listening", r));
   base = `http://127.0.0.1:${server.address().port}`;
@@ -31,6 +34,7 @@ before(async () => {
 
 after(() => {
   server && server.close();
+  stubServer && stubServer.close();
 });
 
 // Signature Bitnob : HMAC-SHA512(body brut, secret) en hex.
@@ -48,6 +52,20 @@ async function jsonFetch(path, { method = "GET", body, headers } = {}) {
   return { status: res.status, data };
 }
 
+// Attend qu'une condition soit vraie sur le statut d'une facture. La liquidation
+// est déclenchée en tâche de fond après la réponse du webhook : on poll brièvement.
+async function waitForStatus(reference, predicate, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const { data } = await jsonFetch(`/api/invoices/${reference}/status`);
+    last = data;
+    if (predicate(data)) return data;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return last;
+}
+
 // ---------------------------------------------------------------- santé
 test("GET /health répond ok", async () => {
   const { status, data } = await jsonFetch("/health");
@@ -62,11 +80,16 @@ test("Auth OTP : demande -> vérification -> session -> profil protégé", async
   const req = await jsonFetch("/api/auth/otp", { method: "POST", body: { phone, shop: "Boutique Test" } });
   assert.equal(req.status, 200);
   assert.equal(req.data.success, true);
-  assert.ok(req.data.demoCode, "le code doit être renvoyé en mode démo");
+  assert.equal(req.data.demoCode, undefined, "le code OTP ne doit jamais être renvoyé par l'API");
+
+  // Sans prestataire SMS configuré, le code est journalisé côté serveur (repli console) :
+  // les tests le lisent dans le registre OTP (clé = numéro normalisé).
+  const record = store.collection("otps").get("+221771234567");
+  assert.ok(record?.code, "un OTP doit être enregistré pour le numéro normalisé");
 
   const verify = await jsonFetch("/api/auth/otp/verify", {
     method: "POST",
-    body: { phone, code: req.data.demoCode },
+    body: { phone, code: record.code },
   });
   assert.equal(verify.status, 200);
   assert.ok(verify.data.session?.token, "un jeton de session doit être renvoyé");
@@ -174,8 +197,8 @@ test("Factures : 401 sans jeton, création/liste scopées au compte connecté", 
   });
   assert.equal(anonCreate.status, 401);
 
-  // Création authentifiée (DEMO_MODE : Bitnob simulé, aucun appel réseau).
-  // Un tentative d'usurpation via le body est ignorée : le marchand vient de la session.
+  // Création authentifiée (stub Bitnob local : aucun appel réseau externe).
+  // Une tentative d'usurpation via le body est ignorée : le marchand vient de la session.
   const created = await jsonFetch("/api/invoices", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
@@ -208,7 +231,7 @@ test("Factures : 401 sans jeton, création/liste scopées au compte connecté", 
 });
 
 // ---------------------------------------------------------------- webhook Bitnob
-test("Webhook Bitnob signé marque la facture payée (liquidation simulée)", async () => {
+test("Webhook Bitnob signé marque la facture payée (liquidation via stub)", async () => {
   const reference = "test-ref-" + Date.now();
   // On insère directement une facture dans le registre persistant (même singleton).
   store.collection("invoices").set(reference, {
@@ -248,9 +271,11 @@ test("Webhook Bitnob signé marque la facture payée (liquidation simulée)", as
   });
   assert.equal(ok.status, 200);
 
-  const status = await jsonFetch(`/api/invoices/${reference}/status`);
-  assert.equal(status.data.status, "paid");
-  assert.equal(status.data.payoutStatus, "simulated"); // liquidation simulée (DEMO_MODE)
+  // La liquidation est lancée en tâche de fond : on attend la soumission du payout
+  // (quote -> initialize -> finalize) contre le stub Bitnob.
+  const status = await waitForStatus(reference, (data) => data.payoutStatus === "done");
+  assert.equal(status.status, "paid");
+  assert.equal(status.payoutStatus, "done"); // payout soumis (statut PENDING côté Bitnob)
 });
 
 test("Persistance : la facture survit à une relecture du store", () => {
@@ -272,7 +297,7 @@ test("Webhook payouts.withdrawal.success confirme le payout (completed)", async 
     merchantPhone: "771234567",
     provider: "wave",
     status: "paid",
-    payoutStatus: "simulated",
+    payoutStatus: "processing",
     createdAt: new Date().toISOString(),
   });
 
@@ -305,7 +330,7 @@ test("Webhook payouts.withdrawal.expired marque le payout en échec", async () =
     merchantPhone: "771234567",
     provider: "orange",
     status: "paid",
-    payoutStatus: "simulated",
+    payoutStatus: "processing",
     createdAt: new Date().toISOString(),
   });
 
@@ -370,21 +395,6 @@ test("SMS : le canal Twilio est prioritaire sur WhatsApp quand configuré", () =
 
   delete process.env.WHATSAPP_TOKEN;
   delete process.env.WHATSAPP_PHONE_ID;
-});
-
-// ---------------------------------------------------------------- Stripe (carte)
-test("Signature Stripe vérifiable côté serveur (unit)", () => {
-  const payload = JSON.stringify({ type: "checkout.session.completed" });
-  const t = Math.floor(Date.now() / 1000);
-  const sig = crypto.createHmac("sha256", process.env.STRIPE_WEBHOOK_SECRET).update(`${t}.${payload}`).digest("hex");
-  assert.equal(stripe.verifyWebhookSignature(payload, `t=${t},v1=${sig}`), true);
-  assert.equal(stripe.verifyWebhookSignature(payload, `t=${t},v1=bad`), false);
-});
-
-test("POST /api/invoices/:id/card -> 503 si Stripe non configuré", async () => {
-  const { status, data } = await jsonFetch("/api/invoices/xyz/card", { method: "POST", body: {} });
-  assert.equal(status, 503);
-  assert.equal(data.success, false);
 });
 
 // ------------------------------------------------- debug webhook (secret × algo)
