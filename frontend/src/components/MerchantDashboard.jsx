@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { createPaymentLink, listPaymentLinks, updateMerchant } from "../services/api";
+import { createPaymentLink, listPaymentLinks, listWalletTransactions, updateMerchant } from "../services/api";
 
 const STORAGE_PREFIX = "teranga-invoices";
 const DEFAULT_SHOP = "Atelier Awa Couture";
@@ -89,6 +89,17 @@ const IconWallet = (props) => (
   <Svg {...props}>
     <path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
     <path d="M16 12h.01M3 9h18" />
+  </Svg>
+);
+const IconBitcoin = (props) => (
+  <Svg {...props}>
+    <path d="M10 5h4.5a3.5 3.5 0 0 1 0 7H10m0 0h5a3.5 3.5 0 0 1 0 7h-5M10 5v14M12.5 3v2M15.5 3v2M12.5 19v2M15.5 19v2" />
+  </Svg>
+);
+const IconRefresh = (props) => (
+  <Svg {...props}>
+    <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
+    <path d="M21 3v5h-5" />
   </Svg>
 );
 const IconReceipt = (props) => (
@@ -197,6 +208,32 @@ function mergeInvoices(localList, remoteList) {
 
 function formatXOF(value) {
   return Number(value || 0).toLocaleString("fr-FR");
+}
+
+// Montant BTC (8 décimales, séparateur français) — ex. "0,00000208".
+function formatBTC(value) {
+  return Number(value || 0).toLocaleString("fr-FR", {
+    minimumFractionDigits: 8,
+    maximumFractionDigits: 8,
+  });
+}
+
+// Date + heure d'une transaction BTC — ex. "17 oct. 2026, 15h44".
+function formatBtcDate(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  const date = d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "numeric" });
+  const time = d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  return `${date}, ${time.replace(":", "h")}`;
+}
+
+// Tronque un hachage de transaction pour l'affichage (début…fin).
+function shortHash(value) {
+  const s = String(value || "");
+  if (!s) return "—";
+  if (s.length <= 20) return s;
+  return `${s.slice(0, 10)}…${s.slice(-8)}`;
 }
 
 // Saisie d'un numéro sénégalais : groupe les chiffres par 2-3-2-2 (ex. 77 123 45 67)
@@ -324,6 +361,104 @@ function ActivityChart({ bars, max }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   Activité récente BTC (portefeuille Bitnob)
+   Liste date / description / type / montant / hachage.
+   ============================================================ */
+function BtcActivityPanel({ transactions, loading, error, onRefresh }) {
+  const rows = Array.isArray(transactions) ? transactions : [];
+
+  return (
+    <div className="rounded-2xl border border-line/10 bg-card/60 p-5 backdrop-blur">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-400">
+            <IconBitcoin className="h-4 w-4" />
+          </span>
+          <div>
+            <p className="text-sm font-bold">Activité récente BTC</p>
+            <p className="text-[11px] text-ink-subtle">
+              Une liste des activités récentes effectuées depuis et vers votre portefeuille BTC
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={onRefresh}
+          disabled={loading}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-line/10 px-3 py-1.5 text-xs font-medium text-ink-muted transition hover:bg-band/5 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <IconRefresh className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+          Actualiser
+        </button>
+      </div>
+
+      {error ? (
+        <p className="mt-4 rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-400">
+          {error}
+        </p>
+      ) : rows.length === 0 ? (
+        <p className="mt-4 rounded-lg border border-dashed border-line/15 bg-band/[0.03] px-3 py-6 text-center text-xs text-ink-subtle">
+          {loading ? "Chargement de l'activité BTC…" : "Aucune activité BTC pour le moment."}
+        </p>
+      ) : (
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[680px] text-left text-sm">
+            <thead>
+              <tr className="border-b border-line/10 text-[11px] uppercase tracking-wide text-ink-faint">
+                <th className="py-2 pr-4 font-semibold">Date</th>
+                <th className="py-2 pr-4 font-semibold">Description</th>
+                <th className="py-2 pr-4 font-semibold">Type</th>
+                <th className="py-2 pr-4 text-right font-semibold">Montant</th>
+                <th className="py-2 font-semibold">Hachage de transaction</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((tx) => {
+                const credit = tx.direction === "credit";
+                return (
+                  <tr
+                    key={tx.id || `${tx.reference}-${tx.date}`}
+                    className="border-b border-line/5 last:border-0 hover:bg-band/[0.03]"
+                  >
+                    <td className="whitespace-nowrap py-2.5 pr-4 text-xs text-ink-subtle">
+                      {formatBtcDate(tx.date)}
+                    </td>
+                    <td className="max-w-[16rem] truncate py-2.5 pr-4 text-xs text-ink" title={tx.description}>
+                      {tx.description || "—"}
+                    </td>
+                    <td className="py-2.5 pr-4">
+                      <span
+                        className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+                          credit
+                            ? "border-emerald-500/30 bg-emerald-500/10 text-accent"
+                            : "border-rose-500/30 bg-rose-500/10 text-rose-400"
+                        }`}
+                      >
+                        {tx.typeLabel || (credit ? "Dépôt" : "Paiement")}
+                      </span>
+                    </td>
+                    <td
+                      className={`whitespace-nowrap py-2.5 pr-4 text-right font-mono text-xs font-semibold ${
+                        credit ? "text-accent" : "text-ink"
+                      }`}
+                    >
+                      {credit ? "+" : "-"}
+                      {formatBTC(tx.amountBtc)} {tx.currency || "BTC"}
+                    </td>
+                    <td className="py-2.5 font-mono text-[11px] text-ink-faint" title={tx.txHash}>
+                      {shortHash(tx.txHash)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -707,6 +842,9 @@ export default function MerchantDashboard({
   const [modalInvoice, setModalInvoice] = useState(null);
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
+  const [transactions, setTransactions] = useState([]);
+  const [txLoading, setTxLoading] = useState(false);
+  const [txError, setTxError] = useState("");
   const [theme, setTheme] = useState(() =>
     typeof document !== "undefined" ? document.documentElement.dataset.theme || "dark" : "dark"
   );
@@ -750,6 +888,39 @@ export default function MerchantDashboard({
       cancelled = true;
     };
   }, [storageKey, session?.phone, session?.token]);
+
+  // [BTC] Charge l'activité récente du portefeuille Bitcoin du marchand.
+  useEffect(() => {
+    const digits = phoneDigits(session?.phone || "");
+    if (!digits || !session?.token) return; // mode démo sans session : pas d'appel
+    let cancelled = false;
+    setTxLoading(true);
+    setTxError("");
+    listWalletTransactions(session.token, { limit: 25 })
+      .then((res) => {
+        if (cancelled) return;
+        setTransactions(Array.isArray(res?.transactions) ? res.transactions : []);
+      })
+      .catch(() => {
+        if (!cancelled) setTxError("Activité BTC indisponible pour le moment.");
+      })
+      .finally(() => {
+        if (!cancelled) setTxLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.phone, session?.token]);
+
+  const refreshTransactions = () => {
+    if (!session?.token) return;
+    setTxLoading(true);
+    setTxError("");
+    listWalletTransactions(session.token, { limit: 25 })
+      .then((res) => setTransactions(Array.isArray(res?.transactions) ? res.transactions : []))
+      .catch(() => setTxError("Activité BTC indisponible pour le moment."))
+      .finally(() => setTxLoading(false));
+  };
 
   const stats = useMemo(() => {
     const paid = invoices.filter((i) => i.status === "paid");
@@ -1065,6 +1236,16 @@ export default function MerchantDashboard({
         {/* ===================== Activité ===================== */}
         <div className="mt-4">
           <ActivityChart bars={activity.bars} max={activity.max} />
+        </div>
+
+        {/* ===================== Activité récente BTC ===================== */}
+        <div className="mt-4">
+          <BtcActivityPanel
+            transactions={transactions}
+            loading={txLoading}
+            error={txError}
+            onRefresh={refreshTransactions}
+          />
         </div>
 
         {/* ===================== Formulaire + Historique ===================== */}
