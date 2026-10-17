@@ -16,6 +16,10 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "20"
+      # Render force NODE_ENV=production par défaut, ce qui bloquerait DEMO_MODE=true
+      # (garde-fou volontaire). On reste en développement pour la démo publique.
+      - key: NODE_ENV
+        value: development
       - key: DEMO_MODE
         value: "true"
       # URL publique du frontend (CORS restreint). À remplacer par l'URL du site static.
