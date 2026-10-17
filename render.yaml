@@ -1,0 +1,66 @@
+# [FICHIER] : render.yaml — Blueprint de déploiement Render (backend + frontend).
+# [RÔLE] : provisionner les deux services d'un coup (New > Blueprint > ce dépôt).
+# [SECRETS] : les variables marquées `sync: false` sont demandées à la création
+#            (elles ne sont jamais committées). Voir DEPLOY.md pour la procédure.
+
+services:
+  # --- Backend : API Node.js/Express ---
+  - type: web
+    name: teranga-pay-backend
+    runtime: node
+    plan: free
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DEMO_MODE
+        value: "true"
+      # URL publique du frontend (CORS restreint). À remplacer par l'URL du site static.
+      - key: FRONTEND_URL
+        sync: false
+      # URL publique du backend (webhooks Bitnob / callback payout) = URL du service.
+      - key: PUBLIC_URL
+        sync: false
+      - key: PAYOUT_CALLBACK_URL
+        sync: false
+      # --- Bitnob (sandbox) : laisser vide en mode démo ---
+      - key: BITNOB_BASE_URL
+        value: https://api.bitnob.com
+      - key: BITNOB_CLIENT_ID
+        sync: false
+      - key: BITNOB_CLIENT_SECRET
+        sync: false
+      - key: BITNOB_WEBHOOK_SECRET
+        sync: false
+      # --- Stripe (carte) : optionnel ---
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      # --- Divers ---
+      - key: XOF_PER_BTC
+        value: "60000000"
+      - key: PAYOUT_PAYMENT_REASON
+        value: goods_and_services
+      - key: WEBHOOK_DEBUG
+        value: "false"
+
+  # --- Frontend : site statique Vite (React) ---
+  - type: web
+    name: teranga-pay-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      # URL de l'API backend, ex. https://teranga-pay-backend.onrender.com/api
+      - key: VITE_API_URL
+        sync: false
+    routes:
+      # Fallback SPA : toute route inconnue sert index.html.
+      - type: rewrite
+        source: /*
+        destination: /index.html
