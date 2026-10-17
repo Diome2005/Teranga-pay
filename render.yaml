@@ -16,12 +16,12 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "20"
-      # Render force NODE_ENV=production par défaut, ce qui bloquerait DEMO_MODE=true
-      # (garde-fou volontaire). On reste en développement pour la démo publique.
+      # Production réelle : NODE_ENV=production + DEMO_MODE=false (le backend refuse
+      # DEMO_MODE=true en production). Les paiements/liq. passent par Bitnob (clés ci-dessous).
       - key: NODE_ENV
-        value: development
+        value: production
       - key: DEMO_MODE
-        value: "true"
+        value: "false"
       # URL publique du frontend (CORS restreint). À remplacer par l'URL du site static.
       - key: FRONTEND_URL
         sync: false
@@ -30,7 +30,7 @@ services:
         sync: false
       - key: PAYOUT_CALLBACK_URL
         sync: false
-      # --- Bitnob (sandbox) : laisser vide en mode démo ---
+      # --- Bitnob (sandbox) : renseigner les clés réelles dans le dashboard ---
       - key: BITNOB_BASE_URL
         value: https://api.bitnob.com
       - key: BITNOB_CLIENT_ID
