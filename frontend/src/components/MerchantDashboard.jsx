@@ -185,7 +185,7 @@ function loadInvoices(key) {
 
 // Fusionne l'historique local avec celui du backend.
 // Le backend fait foi (statut paid/pending, payout, bolt11) ; les factures
-// créées hors-ligne (non présentes côté backend) sont conservées.
+// encore en cache local mais absentes du backend sont conservées le temps du rafraîchissement.
 function mergeInvoices(localList, remoteList) {
   const map = new Map();
   for (const inv of localList) map.set(inv.reference || inv.id, inv);
@@ -214,24 +214,6 @@ function phoneDigits(value) {
 function paymentUrl(id) {
   if (typeof window === "undefined") return `https://teranga.pay/i/${id}`;
   return `${window.location.origin}/?pay=${id}`;
-}
-
-function createInvoice(amount, description, provider, phone, shop) {
-  const digits = phoneDigits(phone);
-  return {
-    id: "inv_" + Math.random().toString(36).slice(2, 10),
-    merchant: shop,
-    amount: Number(amount),
-    currency: "FCFA",
-    description: description.trim(),
-    provider: provider.id,
-    liquidation: provider.name,
-    phone: "+221 " + formatPhoneInput(digits),
-    reference:
-      "TGY-" + amount + "-" + Math.random().toString(36).slice(2, 6).toUpperCase(),
-    status: "pending",
-    createdAt: new Date().toISOString(),
-  };
 }
 
 // Normalise une facture renvoyée par l'API vers la forme utilisée par l'interface.
@@ -383,7 +365,7 @@ function ActionButton({ label, onClick, children, variant = "ghost", className =
   );
 }
 
-function InvoiceRow({ invoice, copied, shared, onOpen, onShowQr, onToggle, onRemove, onCopy, onShare }) {
+function InvoiceRow({ invoice, copied, shared, onOpen, onShowQr, onRemove, onCopy, onShare }) {
   const provider = PROVIDERS.find((p) => p.id === invoice.provider);
   const paid = invoice.status === "paid";
   const date = new Date(invoice.createdAt).toLocaleString("fr-FR", {
@@ -445,12 +427,6 @@ function InvoiceRow({ invoice, copied, shared, onOpen, onShowQr, onToggle, onRem
         </button>
         <ActionButton label="Aperçu client" onClick={onOpen}>
           <IconExternal className="h-3.5 w-3.5" />
-        </ActionButton>
-        <ActionButton
-          label={paid ? "Remettre en attente" : "Marquer payé"}
-          onClick={onToggle}
-        >
-          {paid ? <IconClock className="h-3.5 w-3.5" /> : <IconCheck className="h-3.5 w-3.5" />}
         </ActionButton>
         <ActionButton label="Partager" onClick={onShare}>
           {shared ? <IconCheck className="h-3.5 w-3.5 text-accent" /> : <IconShare className="h-3.5 w-3.5" />}
@@ -581,7 +557,7 @@ function AccountView({ session, onSessionChange, onLogout }) {
   const key = spaceKey(session?.phone || "");
 
   // Enregistre le nom de boutique : persiste côté backend (PUT /merchants/me) si un
-  // jeton de session existe, sinon repli sur la session locale (mode démo autonome).
+  // jeton de session existe, sinon repli sur la session locale.
   const saveShop = async (event) => {
     event.preventDefault();
     const value = shop.trim() || DEFAULT_SHOP;
@@ -713,7 +689,7 @@ export default function MerchantDashboard({
   onOpenCheckout,
 }) {
   const shop = session?.shop || DEFAULT_SHOP;
-  const storageKey = `${STORAGE_PREFIX}:${session?.phone || "demo"}`;
+  const storageKey = `${STORAGE_PREFIX}:${session?.phone || "inconnu"}`;
   const [tab, setTab] = useState("dashboard");
   const [invoices, setInvoices] = useState(() => loadInvoices(storageKey));
   const [amount, setAmount] = useState("");
@@ -758,7 +734,7 @@ export default function MerchantDashboard({
   // Repli silencieux sur le local si le backend est indisponible.
   useEffect(() => {
     const digits = phoneDigits(session?.phone || "");
-    if (!digits) return; // mode démo sans numéro : pas d'appel
+    if (!digits) return; // aucune session active : pas d'appel
     let cancelled = false;
     listPaymentLinks({ merchantPhone: digits }, session?.token)
       .then((res) => {
@@ -852,7 +828,6 @@ export default function MerchantDashboard({
     setError("");
     setCreating(true);
 
-    let invoice;
     try {
       const remote = await createPaymentLink(
         {
@@ -864,27 +839,22 @@ export default function MerchantDashboard({
         },
         session?.token
       );
-      invoice = fromApi(remote);
-    } catch {
-      // Backend indisponible (ou non authentifié) -> repli local (mode démo autonome)
-      invoice = createInvoice(value, description, providerObj, phone, shop);
-      showToast("Backend indisponible — facture enregistrée localement.");
+      const invoice = fromApi(remote);
+      setInvoices((prev) => [invoice, ...prev]);
+      setAmount("");
+      setDescription("");
+      setPhone("");
+      setModalInvoice(invoice);
+      if (invoice.status && invoice.reference) showToast(`Facture ${invoice.reference} créée.`);
+    } catch (err) {
+      setError(
+        err?.response?.data?.error ||
+          "Création impossible — vérifiez le backend, puis réessayez."
+      );
     } finally {
       setCreating(false);
     }
-
-    setInvoices((prev) => [invoice, ...prev]);
-    setAmount("");
-    setDescription("");
-    setPhone("");
-    setModalInvoice(invoice);
-    if (invoice.status && invoice.reference) showToast(`Facture ${invoice.reference} créée.`);
   };
-
-  const toggleStatus = (id) =>
-    setInvoices((prev) =>
-      prev.map((i) => (i.id === id ? { ...i, status: i.status === "paid" ? "pending" : "paid" } : i))
-    );
 
   const removeInvoice = (id) => {
     const target = invoices.find((i) => i.id === id);
@@ -1290,7 +1260,6 @@ export default function MerchantDashboard({
                     shared={sharedId === invoice.id}
                     onOpen={() => onOpenCheckout?.(invoice.id)}
                     onShowQr={() => setModalInvoice(invoice)}
-                    onToggle={() => toggleStatus(invoice.id)}
                     onRemove={() => removeInvoice(invoice.id)}
                     onCopy={() => copyReference(invoice)}
                     onShare={() => shareInvoice(invoice)}

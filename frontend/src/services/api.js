@@ -40,12 +40,6 @@ export async function getPaymentStatus(id) {
   return data;
 }
 
-// (Démo) encaisser sans carte réelle
-export async function simulateCardPayment(id) {
-  const { data } = await api.post(`/invoices/${id}/simulate-card`);
-  return data;
-}
-
 // --- Étape 6 : auth marchand (email + mot de passe, et OTP passwordless) ---
 
 // Crée un compte marchand (email + mot de passe + numéro Mobile Money)
@@ -81,13 +75,6 @@ export async function getMerchant(token) {
 
 export async function updateMerchant(token, payload) {
   const { data } = await api.put("/merchants/me", payload, { headers: authHeaders(token) });
-  return data;
-}
-
-// --- Étape 6 : paiement par carte (Stripe Checkout) ---
-// Renvoie { checkoutUrl } pour rediriger le client ; 503 si Stripe non configuré.
-export async function createCardPayment(id, payload) {
-  const { data } = await api.post(`/invoices/${id}/card`, payload || {});
   return data;
 }
 

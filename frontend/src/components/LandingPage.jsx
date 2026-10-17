@@ -406,9 +406,6 @@ function HeroPreview() {
           <div className="mt-4 rounded-xl bg-emerald-500 py-2.5 text-center text-sm font-bold text-slate-950">
             Payer en Bitcoin Lightning
           </div>
-          <div className="mt-2 rounded-xl border border-line/10 py-2.5 text-center text-xs font-medium text-ink-muted">
-            Payer par Carte / Apple Pay
-          </div>
         </div>
 
         {/* Pastilles flottantes */}
@@ -537,9 +534,6 @@ function CheckoutPhoneMock() {
       <div className="mt-3 rounded-lg bg-emerald-500 py-2 text-center text-xs font-semibold text-slate-950">
         Payer en Bitcoin Lightning
       </div>
-      <div className="mt-2 rounded-lg border border-line/10 py-2 text-center text-[11px] font-medium text-ink-muted">
-        Payer par Carte
-      </div>
     </PhoneFrame>
   );
 }
@@ -565,7 +559,7 @@ const DEMO_TABS = [
     text: "Un paiement sans friction, sans compte à créer.",
     items: [
       "Aucune inscription requise",
-      "Paiement Bitcoin Lightning ou carte",
+      "Paiement Bitcoin Lightning",
       "Confirmation en moins de 3 secondes",
       "Reçu automatique côté client",
     ],
@@ -645,7 +639,7 @@ const STEPS = [
     Icon: IconQr,
     number: "02",
     title: "Scan Lightning",
-    text: "Le client de la diaspora ouvre le lien et paie en Bitcoin Lightning via QR code ou carte.",
+    text: "Le client de la diaspora ouvre le lien et paie en Bitcoin Lightning via QR code.",
   },
   {
     Icon: IconMobile,

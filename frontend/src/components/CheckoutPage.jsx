@@ -1,33 +1,15 @@
 // [FICHIER] : frontend/src/components/CheckoutPage.jsx
 // [RÔLE] : guichet de paiement public (client diaspora, aucune inscription requise).
 // [UI] : Tailwind CSS — tokens de thème (clair/sombre) + accent émeraude. QR Lightning via qrcode.react.
-// [FLUX] : chargement facture -> QR BOLT11 -> paiement Lightning / carte -> polling du statut
-//          -> ouverture de ReceiptModal.jsx quand le paiement est confirmé.
-// [ÉTAPE 6] : le bouton carte tente un vrai paiement Stripe (/api/invoices/:id/card) et
-//          redirige vers la page Stripe ; repli mode démo si Stripe/backend indisponibles.
-// NOTE : mode démo autonome — si le backend (/api/invoices) est indisponible, une facture
-//        d'exemple est utilisée et le paiement est simulé (polling + boutons démo).
+// [FLUX] : chargement facture (GET /api/invoices/:id) -> QR BOLT11 -> paiement Lightning
+//          -> polling du statut (GET /api/invoices/:id/status) -> ReceiptModal.jsx quand payé.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import ReceiptModal from "./ReceiptModal";
-import { createCardPayment, getPaymentLink, getPaymentStatus, simulateCardPayment } from "../services/api";
+import { getPaymentLink, getPaymentStatus } from "../services/api";
 
-// --- Données de démonstration (remplacées par l'API quand le backend sera prêt) ---
 const EXPIRY_SECONDS = 15 * 60;
-
-const DEMO_INVOICE = {
-  id: "inv_demo_25000",
-  merchant: "Atelier Awa Couture",
-  amount: 25000,
-  currency: "FCFA",
-  description: "Robe brodée taille M",
-  bolt11:
-    "lnbc250u1p3terangapay0pp5qqqsyqcyq5rqwzqfpg9scrgwpugpzysn7j4dx9qqqsyqcyq5rqwzqfpg9scrgwpugpzysn",
-  reference: "TGY-25000-AWA-001",
-  method: "Bitcoin Lightning",
-  liquidation: "Wave",
-};
 
 /* ---------------------- Icônes (SVG) ======================= */
 function IconBack({ className }) {
@@ -63,15 +45,6 @@ function IconCheck({ className }) {
   );
 }
 
-function IconCard({ className }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
-      <rect x="2" y="5" width="20" height="14" rx="2.5" />
-      <path d="M2 10h20" />
-    </svg>
-  );
-}
-
 function IconShield({ className }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
@@ -96,48 +69,52 @@ function formatCountdown(total) {
   return `${mm}:${ss}`;
 }
 
-// Facture créée localement par le Dashboard marchand.
-// Les factures sont scopées par marchand : clés "teranga-invoices:<numéro>".
-function findLocalInvoice(id) {
-  try {
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith("teranga-invoices")) continue;
-      const raw = localStorage.getItem(key);
-      const list = raw ? JSON.parse(raw) : [];
-      if (!Array.isArray(list)) continue;
-      const found = list.find((inv) => inv.id === id);
-      if (found) return found;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 /* ---------------------- Composant ======================= */
-export default function CheckoutPage({ invoiceId, justPaid, onViewChange }) {
-  const [invoice, setInvoice] = useState(DEMO_INVOICE);
+export default function CheckoutPage({ invoiceId, onViewChange }) {
+  const [invoice, setInvoice] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [status, setStatus] = useState("pending"); // pending | paid | expired
   const [showReceipt, setShowReceipt] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(EXPIRY_SECONDS);
   const [copied, setCopied] = useState(false);
   const [paidAt, setPaidAt] = useState("");
-  const [cardBusy, setCardBusy] = useState(false);
-  const pollCount = useRef(0);
 
-  // Chargement de la facture (fallback démo si backend indisponible)
+  // Chargement de la facture depuis le backend.
   useEffect(() => {
     let alive = true;
-    if (!invoiceId) return () => { alive = false; };
+    if (!invoiceId) {
+      setLoading(false);
+      setLoadError("Aucune facture indiquée dans ce lien.");
+      return () => {
+        alive = false;
+      };
+    }
 
+    setLoading(true);
+    setLoadError("");
     (async () => {
       try {
         const data = await getPaymentLink(invoiceId);
-        if (alive && data) setInvoice((prev) => ({ ...prev, ...data, id: invoiceId }));
-      } catch {
-        const local = findLocalInvoice(invoiceId);
-        if (alive) setInvoice((prev) => ({ ...prev, ...(local || {}), id: invoiceId }));
+        if (!alive) return;
+        if (!data || !data.id) {
+          setLoadError("Facture introuvable. Demandez un nouveau lien au marchand.");
+          return;
+        }
+        setInvoice(data);
+        if (data.status === "paid") {
+          setStatus("paid");
+          if (data.paidAt) setPaidAt(new Date(data.paidAt).toLocaleString("fr-FR"));
+        }
+      } catch (err) {
+        if (!alive) return;
+        setLoadError(
+          err?.response?.status === 404
+            ? "Facture introuvable. Demandez un nouveau lien au marchand."
+            : "Impossible de charger la facture. Vérifiez votre connexion et réessayez."
+        );
+      } finally {
+        if (alive) setLoading(false);
       }
     })();
 
@@ -146,46 +123,41 @@ export default function CheckoutPage({ invoiceId, justPaid, onViewChange }) {
     };
   }, [invoiceId]);
 
+  // Cale le décompte sur l'expiration réelle de la facture (renvoyée par le backend).
+  useEffect(() => {
+    if (!invoice?.expiresAt || status !== "pending") return;
+    const ms = new Date(invoice.expiresAt).getTime() - Date.now();
+    if (Number.isFinite(ms)) setSecondsLeft(Math.max(0, Math.round(ms / 1000)));
+  }, [invoice, status]);
+
   // Décompte d'expiration
   useEffect(() => {
-    if (status !== "pending") return undefined;
+    if (status !== "pending" || !invoice) return undefined;
     const t = setInterval(() => setSecondsLeft((s) => (s <= 1 ? 0 : s - 1)), 1000);
     return () => clearInterval(t);
-  }, [status]);
+  }, [status, invoice]);
 
   useEffect(() => {
-    if (secondsLeft === 0 && status === "pending") setStatus("expired");
-  }, [secondsLeft, status]);
+    if (secondsLeft === 0 && status === "pending" && invoice) setStatus("expired");
+  }, [secondsLeft, status, invoice]);
 
-  // Polling du statut de paiement
+  // Polling du statut de paiement (le backend confirme via webhook Bitnob / polling Lightning).
   useEffect(() => {
-    if (status !== "pending") return undefined;
-
-    let backendDown = false;
+    if (!invoice?.id || status !== "pending") return undefined;
 
     const timer = setInterval(async () => {
-      pollCount.current += 1;
-      let paid = false;
-
       try {
         const data = await getPaymentStatus(invoice.id);
-        paid = data.status === "paid" || data.status === "confirmed";
-        backendDown = false;
+        if (data.status === "paid" || data.status === "confirmed") confirmPayment();
+        else if (data.status === "expired") setStatus("expired");
       } catch {
-        // backend indisponible -> mode démo
-        backendDown = true;
+        /* backend momentanément injoignable : on continue d'attendre */
       }
-
-      // Mode démo autonome : on ne simule le paiement (~12 s) que si le backend est
-      // indisponible. Sinon on continue d'attendre le paiement réel sans le déclencher à tort.
-      if (!paid && backendDown && pollCount.current >= 3) paid = true;
-
-      if (paid) confirmPayment();
     }, 4000);
 
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, invoice.id]);
+  }, [status, invoice?.id]);
 
   const confirmPayment = () => {
     setStatus("paid");
@@ -193,42 +165,8 @@ export default function CheckoutPage({ invoiceId, justPaid, onViewChange }) {
     setShowReceipt(true);
   };
 
-  // Retour depuis Stripe Checkout (?paid=1) : le paiement est confirmé côté serveur.
-  useEffect(() => {
-    if (justPaid) confirmPayment();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [justPaid]);
-
-  // [ÉTAPE 6] Paiement par carte réel via Stripe Checkout ; repli mode démo si indisponible.
-  const payByCard = async () => {
-    setCardBusy(true);
-    try {
-      const res = await createCardPayment(invoice.id);
-      if (res?.checkoutUrl) {
-        // Redirection vers la page de paiement Stripe ; le retour se fait via ?pay=<ref>.
-        window.location.href = res.checkoutUrl;
-        return;
-      }
-      confirmPayment();
-    } catch {
-      // Stripe non configuré ou backend absent -> simulation (mode démo).
-      confirmPayment();
-    } finally {
-      setCardBusy(false);
-    }
-  };
-
-  // (Démo) encaissement simulé via le backend (POST /simulate-card) ; repli local si absent.
-  const simulatePayment = async () => {
-    try {
-      await simulateCardPayment(invoice.id);
-    } catch {
-      // Backend indisponible ou mode réel -> simulation locale.
-    }
-    confirmPayment();
-  };
-
   const copyBolt11 = async () => {
+    if (!invoice?.bolt11) return;
     try {
       await navigator.clipboard.writeText(invoice.bolt11);
       setCopied(true);
@@ -238,7 +176,7 @@ export default function CheckoutPage({ invoiceId, justPaid, onViewChange }) {
     }
   };
 
-  const receiptData = { ...invoice, date: paidAt };
+  const receiptData = invoice ? { ...invoice, date: paidAt } : null;
 
   return (
     <div className="min-h-screen bg-base text-ink">
@@ -262,132 +200,137 @@ export default function CheckoutPage({ invoiceId, justPaid, onViewChange }) {
       </header>
 
       <main className="mx-auto max-w-4xl px-6 py-10">
-        <div className="grid gap-8 md:grid-cols-2">
-          {/* Récapitulatif */}
-          <section>
-            <p className="text-xs font-semibold uppercase tracking-wider text-accent">
-              Guichet de paiement
-            </p>
-            <h1 className="mt-3 text-2xl font-bold tracking-tight">Paiement sécurisé</h1>
-            <p className="mt-2 text-sm text-ink-subtle">
-              Réglez votre commande auprès de {invoice.merchant} en quelques secondes.
-            </p>
-
-            <div className="mt-6 rounded-2xl border border-line/10 bg-band/5 p-5">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-xs uppercase tracking-wide text-ink-faint">Marchand</p>
-                  <p className="font-semibold">{invoice.merchant}</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-xs uppercase tracking-wide text-ink-faint">Facture</p>
-                  <p className="font-mono text-xs text-ink-muted">{invoice.id}</p>
-                </div>
-              </div>
-
-              <div className="mt-4 border-t border-line/5 pt-4">
-                <p className="text-xs uppercase tracking-wide text-ink-faint">Désignation</p>
-                <p className="text-ink">{invoice.description}</p>
-              </div>
-
-              <div className="mt-4 flex items-end justify-between border-t border-line/5 pt-4">
-                <span className="text-sm text-ink-subtle">Total à payer</span>
-                <span className="text-2xl font-black">
-                  {Number(invoice.amount).toLocaleString("fr-FR")}{" "}
-                  <span className="text-sm font-semibold text-ink-subtle">{invoice.currency}</span>
-                </span>
-              </div>
-            </div>
-
-            <div className="mt-4 flex items-center gap-2 text-xs text-ink-faint">
-              <IconShield className="h-4 w-4 text-accent" />
-              Paiement sécurisé sur le réseau Bitcoin Lightning
-            </div>
-          </section>
-
-          {/* Paiement */}
-          <section className="rounded-2xl border border-line/10 bg-card/50 p-5">
-            {status === "pending" && (
+        {loading || !invoice ? (
+          <div className="mx-auto max-w-md rounded-2xl border border-line/10 bg-card/50 p-8 text-center">
+            {loadError ? (
               <>
-                <div className="flex items-center justify-between">
-                  <p className="text-sm font-semibold">Payer en Bitcoin Lightning</p>
-                  <span className="flex items-center gap-1 text-xs text-ink-subtle">
-                    <IconClock className="h-3.5 w-3.5" />
-                    {formatCountdown(secondsLeft)}
-                  </span>
-                </div>
-
-                <div className="mt-4 flex justify-center rounded-xl bg-white p-4">
-                  <QRCodeSVG value={invoice.bolt11} size={176} />
-                </div>
-
+                <p className="font-bold">Facture indisponible</p>
+                <p className="mt-2 text-sm text-ink-subtle">{loadError}</p>
                 <button
-                  onClick={copyBolt11}
-                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-line/10 py-2 text-xs text-ink-muted transition hover:bg-band/5"
-                >
-                  <IconCopy className="h-4 w-4" />
-                  {copied ? "Facture copiée" : "Copier la facture Lightning"}
-                </button>
-
-                <div className="my-5 flex items-center gap-3 text-xs text-ink-faint">
-                  <span className="h-px flex-1 bg-band/10" />
-                  ou
-                  <span className="h-px flex-1 bg-band/10" />
-                </div>
-
-                <button
-                  onClick={payByCard}
-                  disabled={cardBusy}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <IconCard className="h-4 w-4" />
-                  {cardBusy ? "Redirection…" : "Payer par Carte / Apple Pay"}
-                </button>
-
-                <button
-                  onClick={simulatePayment}
-                  className="mt-3 w-full rounded-lg border border-line/10 py-2 text-xs text-ink-subtle transition hover:bg-band/5"
-                >
-                  Simuler le paiement (démo)
-                </button>
-              </>
-            )}
-
-            {status === "paid" && (
-              <div className="flex flex-col items-center py-8 text-center">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 text-accent">
-                  <IconCheck className="h-7 w-7" />
-                </div>
-                <p className="mt-4 font-bold">Paiement confirmé</p>
-                <p className="mt-1 text-sm text-ink-subtle">
-                  Liquidation vers {invoice.liquidation} en cours.
-                </p>
-                <button
-                  onClick={() => setShowReceipt(true)}
+                  onClick={() => onViewChange?.("landing")}
                   className="mt-5 rounded-xl bg-emerald-500 px-6 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
                 >
-                  Voir le reçu
+                  Retour à l'accueil
                 </button>
-              </div>
+              </>
+            ) : (
+              <p className="text-sm text-ink-subtle">Chargement de la facture…</p>
             )}
+          </div>
+        ) : (
+          <div className="grid gap-8 md:grid-cols-2">
+            {/* Récapitulatif */}
+            <section>
+              <p className="text-xs font-semibold uppercase tracking-wider text-accent">
+                Guichet de paiement
+              </p>
+              <h1 className="mt-3 text-2xl font-bold tracking-tight">Paiement sécurisé</h1>
+              <p className="mt-2 text-sm text-ink-subtle">
+                Réglez votre commande auprès de {invoice.merchant} en quelques secondes.
+              </p>
 
-            {status === "expired" && (
-              <div className="flex flex-col items-center py-8 text-center">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-300">
-                  <IconClock className="h-7 w-7" />
+              <div className="mt-6 rounded-2xl border border-line/10 bg-band/5 p-5">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-ink-faint">Marchand</p>
+                    <p className="font-semibold">{invoice.merchant}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs uppercase tracking-wide text-ink-faint">Facture</p>
+                    <p className="font-mono text-xs text-ink-muted">{invoice.reference || invoice.id}</p>
+                  </div>
                 </div>
-                <p className="mt-4 font-bold">Facture expirée</p>
-                <p className="mt-1 text-sm text-ink-subtle">
-                  Ce lien de paiement a expiré. Demandez-en un nouveau au marchand.
-                </p>
+
+                <div className="mt-4 border-t border-line/5 pt-4">
+                  <p className="text-xs uppercase tracking-wide text-ink-faint">Désignation</p>
+                  <p className="text-ink">{invoice.description}</p>
+                </div>
+
+                <div className="mt-4 flex items-end justify-between border-t border-line/5 pt-4">
+                  <span className="text-sm text-ink-subtle">Total à payer</span>
+                  <span className="text-2xl font-black">
+                    {Number(invoice.amount).toLocaleString("fr-FR")}{" "}
+                    <span className="text-sm font-semibold text-ink-subtle">{invoice.currency}</span>
+                  </span>
+                </div>
               </div>
-            )}
-          </section>
-        </div>
+
+              <div className="mt-4 flex items-center gap-2 text-xs text-ink-faint">
+                <IconShield className="h-4 w-4 text-accent" />
+                Paiement sécurisé sur le réseau Bitcoin Lightning
+              </div>
+            </section>
+
+            {/* Paiement */}
+            <section className="rounded-2xl border border-line/10 bg-card/50 p-5">
+              {status === "pending" && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold">Payer en Bitcoin Lightning</p>
+                    <span className="flex items-center gap-1 text-xs text-ink-subtle">
+                      <IconClock className="h-3.5 w-3.5" />
+                      {formatCountdown(secondsLeft)}
+                    </span>
+                  </div>
+
+                  {invoice.bolt11 ? (
+                    <>
+                      <div className="mt-4 flex justify-center rounded-xl bg-white p-4">
+                        <QRCodeSVG value={invoice.bolt11} size={176} />
+                      </div>
+
+                      <button
+                        onClick={copyBolt11}
+                        className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-line/10 py-2 text-xs text-ink-muted transition hover:bg-band/5"
+                      >
+                        <IconCopy className="h-4 w-4" />
+                        {copied ? "Facture copiée" : "Copier la facture Lightning"}
+                      </button>
+                    </>
+                  ) : (
+                    <p className="mt-4 rounded-lg border border-dashed border-line/15 px-3 py-4 text-center text-xs text-ink-subtle">
+                      Facture Lightning indisponible — demandez un nouveau lien au marchand.
+                    </p>
+                  )}
+                </>
+              )}
+
+              {status === "paid" && (
+                <div className="flex flex-col items-center py-8 text-center">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 text-accent">
+                    <IconCheck className="h-7 w-7" />
+                  </div>
+                  <p className="mt-4 font-bold">Paiement confirmé</p>
+                  <p className="mt-1 text-sm text-ink-subtle">
+                    Liquidation vers {invoice.liquidation} en cours.
+                  </p>
+                  <button
+                    onClick={() => setShowReceipt(true)}
+                    className="mt-5 rounded-xl bg-emerald-500 px-6 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
+                  >
+                    Voir le reçu
+                  </button>
+                </div>
+              )}
+
+              {status === "expired" && (
+                <div className="flex flex-col items-center py-8 text-center">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-full border border-amber-500/30 bg-amber-500/10 text-amber-300">
+                    <IconClock className="h-7 w-7" />
+                  </div>
+                  <p className="mt-4 font-bold">Facture expirée</p>
+                  <p className="mt-1 text-sm text-ink-subtle">
+                    Ce lien de paiement a expiré. Demandez-en un nouveau au marchand.
+                  </p>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
       </main>
 
       <ReceiptModal
-        open={showReceipt}
+        open={showReceipt && Boolean(receiptData)}
         invoice={receiptData}
         onClose={() => setShowReceipt(false)}
       />

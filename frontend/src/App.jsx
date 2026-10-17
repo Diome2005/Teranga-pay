@@ -23,17 +23,14 @@ export default function App() {
   // 'checkout'  -> page publique client diaspora
   const [view, setView] = useState("landing");
   const [checkoutId, setCheckoutId] = useState(null);
-  const [justPaid, setJustPaid] = useState(false);
   const [session, setSession] = useState(() => loadSession());
 
   // Lien de paiement partagé : /?pay=<id> ouvre directement le guichet client.
-  // Retour depuis Stripe Checkout : /?pay=<id>&paid=1 confirme le paiement.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const pay = params.get("pay");
     if (pay) {
       setCheckoutId(pay);
-      setJustPaid(params.get("paid") === "1");
       setView("checkout");
       window.history.replaceState({}, "", window.location.pathname);
     }
@@ -51,7 +48,6 @@ export default function App() {
 
   const goToCheckout = (id) => {
     setCheckoutId(id);
-    setJustPaid(false);
     setView("checkout");
   };
 
@@ -72,7 +68,7 @@ export default function App() {
     }
 
     if (view === "checkout") {
-      return <CheckoutPage invoiceId={checkoutId} justPaid={justPaid} onViewChange={setView} />;
+      return <CheckoutPage invoiceId={checkoutId} onViewChange={setView} />;
     }
 
     return <LandingPage onEnterDashboard={() => setView("dashboard")} />;

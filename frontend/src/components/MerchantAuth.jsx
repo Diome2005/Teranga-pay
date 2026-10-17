@@ -5,7 +5,7 @@
 //          numéro Mobile Money -> code OTP -> espace marchand.
 // [UI] : Tailwind CSS — tokens de thème (clair/sombre) + accent émeraude. Sans emoji.
 // [ÉTAPE 6] : branché au backend (/api/auth/register, /api/auth/login, /api/auth/otp).
-//          Repli démo local de l'OTP si le backend est indisponible.
+//          Le code OTP est délivré par SMS (ou journalisé côté serveur sans prestataire).
 
 import { useEffect, useState } from "react";
 import {
@@ -100,12 +100,10 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
   const [step, setStep] = useState("phone");
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
-  const [sentCode, setSentCode] = useState("");
   const [error, setError] = useState("");
   const [cooldown, setCooldown] = useState(0);
   const [sending, setSending] = useState(false);
   const [verifying, setVerifying] = useState(false);
-  const [smsSent, setSmsSent] = useState(false); // backend en mode réel (pas de demoCode)
 
   const digits = phoneDigits(phone);
 
@@ -166,7 +164,7 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
     }
   };
 
-  // Appelle le backend pour générer un OTP ; repli local si backend absent.
+  // Demande un OTP au backend : envoyé par SMS (ou journalisé côté serveur sans prestataire).
   const sendCode = async (event) => {
     event.preventDefault();
     if (digits.length !== 9) {
@@ -177,19 +175,13 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
     setError("");
     try {
       const res = await requestOtp({ phone: digits });
-      // Le backend renvoie demoCode uniquement en DEMO_MODE ; sinon le code part en SMS.
-      setSentCode(res?.demoCode || "");
-      setSmsSent(!res?.demoCode);
       setCode("");
       setStep("otp");
       setCooldown(res?.resendAfter || OTP_COOLDOWN);
-    } catch {
-      // Backend indisponible -> repli démo autonome (code affiché à l'écran).
-      setSentCode(String(Math.floor(100000 + Math.random() * 900000)));
-      setSmsSent(false);
-      setCode("");
-      setStep("otp");
-      setCooldown(OTP_COOLDOWN);
+    } catch (err) {
+      setError(
+        err?.response?.data?.error || "Envoi impossible — vérifiez le numéro et réessayez."
+      );
     } finally {
       setSending(false);
     }
@@ -201,13 +193,9 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
     setError("");
     try {
       const res = await requestOtp({ phone: digits });
-      setSentCode(res?.demoCode || "");
-      setSmsSent(!res?.demoCode);
       setCooldown(res?.resendAfter || OTP_COOLDOWN);
-    } catch {
-      setSentCode(String(Math.floor(100000 + Math.random() * 900000)));
-      setSmsSent(false);
-      setCooldown(OTP_COOLDOWN);
+    } catch (err) {
+      setError(err?.response?.data?.error || "Renvoi impossible — réessayez.");
     } finally {
       setSending(false);
       setCode("");
@@ -513,18 +501,10 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
                     className="w-full rounded-xl border border-line/10 bg-base/40 px-3 py-3 text-center font-mono text-2xl tracking-[0.5em] outline-none placeholder:text-ink-faint focus:border-emerald-400/50"
                   />
 
-                  {sentCode ? (
-                    <div className="flex items-center gap-2 rounded-lg border border-dashed border-emerald-500/30 bg-emerald-500/[0.06] px-3 py-2 text-xs text-ink-subtle">
-                      <IconShield className="h-4 w-4 shrink-0 text-accent" />
-                      Démo — votre code :{" "}
-                      <span className="font-mono font-bold text-accent">{sentCode}</span>
-                    </div>
-                  ) : smsSent ? (
-                    <div className="flex items-center gap-2 rounded-lg border border-dashed border-line/15 bg-band/5 px-3 py-2 text-xs text-ink-subtle">
-                      <IconShield className="h-4 w-4 shrink-0 text-accent" />
-                      Code envoyé par SMS — saisissez-le pour continuer.
-                    </div>
-                  ) : null}
+                  <div className="flex items-center gap-2 rounded-lg border border-dashed border-emerald-500/30 bg-emerald-500/[0.06] px-3 py-2 text-xs text-ink-subtle">
+                    <IconShield className="h-4 w-4 shrink-0 text-accent" />
+                    Code envoyé par SMS — saisissez-le pour continuer.
+                  </div>
 
                   {error && (
                     <p className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-400">
