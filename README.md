@@ -213,13 +213,15 @@ principaux appellent `onEnterDashboard` pour basculer vers `MerchantDashboard`.
 |---|---|---|
 | GET | `/health` | sonde de santé |
 | GET | `/api/whoami` | valide les identifiants Bitnob |
-| POST | `/api/invoices` | crée client + facture Lightning (BOLT11 + QR) |
-| GET | `/api/invoices` | liste des factures (filtres `merchantPhone` / `merchant` / `status`) |
+| POST | `/api/invoices` | crée client + facture Lightning (BOLT11 + QR) — **protégé `Bearer`** (marchand = session) |
+| GET | `/api/invoices` | liste des factures **du marchand connecté** (`Bearer`), filtres `merchant` / `status` |
 | GET | `/api/invoices/:id` | détail d'un lien de paiement |
 | GET | `/api/invoices/:id/status` | polling du statut (confirmé via Bitnob) |
 | POST | `/api/invoices/:id/simulate-card` | (démo) encaissement sans paiement réel |
 | POST | `/api/webhooks/bitnob` | webhook signé : `btc.lightning.received.success` → liquidation FCFA ; `payouts.withdrawal.success` / `.expired` → statut du payout |
 | GET | `/api/webhooks/bitnob` | sonde du tunnel ngrok |
+| POST | `/api/auth/register` | crée un compte marchand (email + mot de passe) → jeton de session |
+| POST | `/api/auth/login` | connexion email + mot de passe → jeton de session |
 | POST | `/api/auth/otp` | demande un code OTP (passwordless) |
 | POST | `/api/auth/otp/verify` | vérifie le code → jeton de session |
 | GET | `/api/merchants/me` | profil marchand (protégé `Bearer`) |
@@ -231,7 +233,7 @@ Lancer + tester le backend (voir aussi [Installation & lancement](#installation-
 
 ```bash
 cd backend
-npm test        # tests e2e (santé, OTP, webhooks signés, payouts, Stripe)
+npm test        # tests e2e (santé, comptes, OTP, webhooks signés, payouts, Stripe)
 npm run demo    # scénario de démonstration bout-en-bout (jury)
 ```
 
@@ -274,11 +276,32 @@ fonctionnel (aucun crash si le prestataire est absent).
 
 ---
 
+## Comptes marchands (email + mot de passe)
+
+Deux méthodes de connexion coexistent, gérées par `backend/services/auth.js` :
+
+1. **OTP passwordless** — `POST /api/auth/otp` → `POST /api/auth/otp/verify` (téléphone).
+2. **Compte email + mot de passe** — `POST /api/auth/register` (email, mot de passe ≥ 8
+   caractères, numéro Mobile Money, boutique optionnelle) puis `POST /api/auth/login`.
+   Le mot de passe est haché avec **scrypt** (sel aléatoire, comparaison `timingSafeEqual`),
+   jamais stocké en clair ; l'inscription crée aussi la fiche marchand si elle n'existe pas.
+
+Les deux méthodes renvoient la même forme de session `{ email?, phone, shop, since, token }` ;
+le jeton se présente en `Authorization: Bearer <token>` sur les routes protégées.
+
+**Factures rattachées au compte** : `POST /api/invoices` et `GET /api/invoices` exigent un
+jeton valide (401 sinon). Le marchand (`merchantPhone` / `merchant`) est **dérivé de la
+session** — tout `merchantPhone` envoyé dans le body est ignoré (anti-usurpation), et la
+liste ne renvoie que les factures du marchand connecté.
+
+---
+
 ## À faire par l'équipe
 
 - ~~Backend : serveur Express, routes `invoices` / `webhooks`, service `bitnobService.js`~~ ✅ **fait**
 - ~~Persistance (registres factures/OTP/sessions persistants)~~ ✅ **fait** (JSON fichier, `services/store.js`)
 - ~~Auth passwordless (OTP)~~ ✅ **fait** (`services/auth.js`) + envoi SMS/WhatsApp réel (`services/sms.js`)
+- ~~Auth marchand email + mot de passe (scrypt) + factures scopées au compte~~ ✅ **fait** (`accounts` dans `services/auth.js`, `requireMerchant` sur `POST`/`GET /api/invoices`)
 - ~~Paiement carte (Stripe Checkout + webhook)~~ ✅ **fait** (`services/stripe.js`) — renseigner `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
 - ~~Frontend : brancher `CheckoutPage` / `MerchantDashboard` sur les routes OTP et carte~~ ✅ **fait** (helpers `services/api.js`, y compris `PUT /merchants/me`)
 - ~~Flux de bout en bout : lien marchand → paiement Lightning / carte → webhook → payout FCFA~~ ✅ **fait** (`npm run demo`)
@@ -287,12 +310,31 @@ fonctionnel (aucun crash si le prestataire est absent).
 
 ### À confirmer avant mise en production (bloquant)
 
-- **Bitnob — signature HMAC sortante** : confirmer la chaîne signée (`CLIENT_ID:TIMESTAMP:NONCE:PAYLOAD`),
-  les noms d'en-têtes et le format (hex/base64) d'après la doc officielle.
-- **Bitnob — chemins des endpoints** : confirmer le préfixe versionné et les routes exactes
-  (invoices, quotes, initialize, finalize, banks) ainsi que les valeurs de `network` Mobile Money.
-- **Bitnob — webhook entrant** : trancher SHA512 vs SHA256 et `WEBHOOK_SECRET` vs `CLIENT_SECRET`
-  (aujourd'hui `verifyWebhookSignature` teste toutes les combinaisons — temporaire).
+Validé contre la doc officielle (docs.bitnob.com) :
+
+- ✅ **Signature HMAC sortante** : `CLIENT_ID:TIMESTAMP:NONCE:PAYLOAD` signé en HMAC-SHA256 (hex),
+  en-têtes `X-Auth-Client` / `X-Auth-Timestamp` / `X-Auth-Nonce` / `X-Auth-Signature` — conforme
+  (`bitnobService.js`).
+- ✅ **Endpoints** : `/api/whoami`, `/api/customers`, `/api/lightning/invoices[/:id]`,
+  `/api/payouts/quotes` → `/:quoteId/initialize` → `/:quoteId/finalize`, `/api/payouts/banks/:countryCode`.
+- ✅ **Webhook Lightning** : événement `btc.lightning.received.success` ; signature = **HMAC-SHA512**
+  du corps, en-tête `x-bitnob-signature`. Payouts : `payouts.withdrawal.success` / `.expired`
+  (plus `payouts.initialized` / `payouts.processing`, non terminaux, à ignorer).
+
+Reste à confirmer (nécessite le sandbox / des identifiants) :
+
+- **Codes réseau Mobile Money Sénégal** : `MOBILE_MONEY_NETWORKS` (wave/orange/free) est un
+  placeholder — récupérer les valeurs exactes via `GET /api/payouts/supported-countries/SN`
+  et `GET /api/payouts/banks/SN`.
+- **Champ bénéficiaire mobile money** : la doc cite à la fois `network` et `bank_code` pour
+  `mobile_money` — confirmer lequel attend `initialize` via `supported-countries/SN` (source de vérité).
+- **Déduplication webhook** : la doc recommande de dédupliquer sur `event_id` (payload + header
+  `x-bitnob-event-id`) ; aujourd'hui l'idempotence est assurée par les gardes de statut.
+- **Test sandbox réel** : `POST /api/lightning/invoices/:id/simulate-payment` (ou `auto_settle:true`)
+  déclenche un vrai webhook `btc.lightning.received.success` — à utiliser pour valider le flux de bout en bout.
+
+> Procédure de validation pas à pas (whoami → facture réelle → webhook → payout, avec les
+> correctifs à appliquer selon les réponses du sandbox) : **[`VALIDATION-SANDBOX-BITNOB.md`](VALIDATION-SANDBOX-BITNOB.md)**.
 
 ### Améliorations optionnelles
 

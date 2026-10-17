@@ -1,16 +1,23 @@
 // [FICHIER] : frontend/src/components/MerchantAuth.jsx
-// [RÔLE] : connexion "sans friction" du marchand (passwordless).
-// [FLUX] : saisie du numéro Mobile Money -> code OTP -> ouverture de l'espace marchand.
-//          Aucun compte à créer : le numéro + le code suffisent.
+// [RÔLE] : connexion du marchand — compte email + mot de passe (factures conservées),
+//          ou connexion "sans friction" par code SMS (passwordless).
+// [FLUX] : email + mot de passe (connexion/création) -> espace marchand ; en option,
+//          numéro Mobile Money -> code OTP -> espace marchand.
 // [UI] : Tailwind CSS — tokens de thème (clair/sombre) + accent émeraude. Sans emoji.
-// [ÉTAPE 6] : OTP branché au backend (/api/auth/otp + /verify). Repli démo local si le
-//          backend est indisponible (code affiché à l'écran pour la démonstration).
+// [ÉTAPE 6] : branché au backend (/api/auth/register, /api/auth/login, /api/auth/otp).
+//          Repli démo local de l'OTP si le backend est indisponible.
 
 import { useEffect, useState } from "react";
-import { requestOtp, verifyOtp } from "../services/api";
+import {
+  login as apiLogin,
+  register as apiRegister,
+  requestOtp,
+  verifyOtp,
+} from "../services/api";
 
 const PAGE_BG = "/images/dakar-city.jpg";
 const OTP_COOLDOWN = 30;
+const DEFAULT_SHOP = "Atelier Awa Couture";
 
 /* ---------------------- Icônes (SVG) ======================= */
 function Svg({ className, children, strokeWidth = 1.8 }) {
@@ -51,6 +58,18 @@ const IconArrow = (props) => (
     <path d="M5 12h14M13 6l6 6-6 6" />
   </Svg>
 );
+const IconMail = (props) => (
+  <Svg {...props}>
+    <rect x="4" y="6" width="16" height="12" rx="2" />
+    <path d="m4 7 8 6 8-6" />
+  </Svg>
+);
+const IconKey = (props) => (
+  <Svg {...props}>
+    <circle cx="8" cy="15" r="4" />
+    <path d="m11.5 12.5 8-8M17 3l3.5 3.5M14.5 5.5 17 8" />
+  </Svg>
+);
 
 /* ---------------------- Helpers ======================= */
 function formatPhoneInput(value) {
@@ -63,7 +82,21 @@ function phoneDigits(value) {
   return String(value || "").replace(/\D/g, "");
 }
 
+const inputClass =
+  "w-full rounded-xl border border-line/10 bg-base/40 px-3 py-3 text-sm outline-none placeholder:text-ink-faint focus:border-emerald-400/50";
+
 export default function MerchantAuth({ onAuthenticated, onBack }) {
+  // "password" = email + mot de passe (défaut) ; "otp" = code SMS (passwordless)
+  const [mode, setMode] = useState("password");
+  const [tab, setTab] = useState("login"); // "login" | "register"
+
+  // --- Compte email + mot de passe ---
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [shopName, setShopName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  // --- OTP (flux existant) ---
   const [step, setStep] = useState("phone");
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
@@ -81,6 +114,57 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
     const t = setInterval(() => setCooldown((c) => (c <= 1 ? 0 : c - 1)), 1000);
     return () => clearInterval(t);
   }, [cooldown]);
+
+  // [COMPTE] Connexion / création de compte email + mot de passe.
+  const submitPassword = async (event) => {
+    event.preventDefault();
+    if (!email.trim() || !password) {
+      setError("Email et mot de passe requis.");
+      return;
+    }
+    if (tab === "register") {
+      if (password.length < 8) {
+        setError("Le mot de passe doit faire au moins 8 caractères.");
+        return;
+      }
+      if (digits.length !== 9) {
+        setError(
+          "Saisissez un numéro Mobile Money valide (9 chiffres) — il reçoit vos encaissements."
+        );
+        return;
+      }
+    }
+    setSubmitting(true);
+    setError("");
+    try {
+      const res =
+        tab === "register"
+          ? await apiRegister({
+              email: email.trim(),
+              password,
+              phone: digits,
+              shop: shopName.trim() || undefined,
+            })
+          : await apiLogin({ email: email.trim(), password });
+      const session = res?.session || {};
+      onAuthenticated?.({
+        email: res?.email || email.trim().toLowerCase(),
+        phone: session.phone || (digits ? `+221 ${formatPhoneInput(digits)}` : null),
+        shop: session.shop || shopName.trim() || DEFAULT_SHOP,
+        since: session.since || new Date().toISOString(),
+        token: session.token || null,
+      });
+    } catch (err) {
+      const message =
+        err?.response?.data?.error ||
+        (err?.response
+          ? "Connexion impossible. Vérifiez vos identifiants."
+          : "Backend indisponible — réessayez une fois le serveur lancé.");
+      setError(message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   // Appelle le backend pour générer un OTP ; repli local si backend absent.
   const sendCode = async (event) => {
@@ -139,8 +223,9 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
       const res = await verifyOtp({ phone: digits, code });
       const session = res?.session || {};
       onAuthenticated?.({
+        email: res?.email || null,
         phone: session.phone || `+221 ${formatPhoneInput(digits)}`,
-        shop: session.shop || "Atelier Awa Couture",
+        shop: session.shop || DEFAULT_SHOP,
         since: session.since || new Date().toISOString(),
         token: session.token || null,
       });
@@ -151,6 +236,14 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
     } finally {
       setVerifying(false);
     }
+  };
+
+  const switchMode = (next) => {
+    setMode(next);
+    setTab("login");
+    setError("");
+    setStep("phone");
+    setCode("");
   };
 
   return (
@@ -192,7 +285,163 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
               <span className="text-xs font-semibold uppercase tracking-wider">Espace marchand</span>
             </div>
 
-            {step === "phone" ? (
+            {mode === "password" ? (
+              <>
+                <h1 className="mt-5 text-2xl font-bold tracking-tight">
+                  {tab === "login" ? "Connectez-vous" : "Créez votre compte"}
+                </h1>
+                <p className="mt-2 text-sm text-ink-subtle">
+                  {tab === "login"
+                    ? "Email et mot de passe. Vos factures et encaissements sont conservés sur votre compte."
+                    : "Un email, un mot de passe, et le numéro Mobile Money qui reçoit vos encaissements."}
+                </p>
+
+                <div
+                  role="tablist"
+                  aria-label="Connexion ou création de compte"
+                  className="mt-4 grid grid-cols-2 gap-1 rounded-xl border border-line/10 bg-base/40 p-1 text-xs font-semibold"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === "login"}
+                    onClick={() => {
+                      setTab("login");
+                      setError("");
+                    }}
+                    className={`rounded-lg px-3 py-2 transition ${
+                      tab === "login"
+                        ? "bg-emerald-500/15 text-accent"
+                        : "text-ink-subtle hover:text-ink"
+                    }`}
+                  >
+                    Connexion
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === "register"}
+                    onClick={() => {
+                      setTab("register");
+                      setError("");
+                    }}
+                    className={`rounded-lg px-3 py-2 transition ${
+                      tab === "register"
+                        ? "bg-emerald-500/15 text-accent"
+                        : "text-ink-subtle hover:text-ink"
+                    }`}
+                  >
+                    Créer un compte
+                  </button>
+                </div>
+
+                <form onSubmit={submitPassword} className="mt-5 space-y-4">
+                  <div>
+                    <label className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                      Email
+                    </label>
+                    <div className="mt-1.5 flex items-center rounded-xl border border-line/10 bg-base/40 focus-within:border-emerald-400/50">
+                      <span className="pl-3 text-ink-subtle">
+                        <IconMail className="h-4 w-4" />
+                      </span>
+                      <input
+                        type="email"
+                        autoFocus
+                        autoComplete="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="awa@teranga.sn"
+                        className="w-full bg-transparent px-3 py-3 text-sm outline-none placeholder:text-ink-faint"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                      Mot de passe
+                    </label>
+                    <div className="mt-1.5 flex items-center rounded-xl border border-line/10 bg-base/40 focus-within:border-emerald-400/50">
+                      <span className="pl-3 text-ink-subtle">
+                        <IconKey className="h-4 w-4" />
+                      </span>
+                      <input
+                        type="password"
+                        autoComplete={tab === "login" ? "current-password" : "new-password"}
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder={tab === "login" ? "Votre mot de passe" : "8 caractères minimum"}
+                        className="w-full bg-transparent px-3 py-3 text-sm outline-none placeholder:text-ink-faint"
+                      />
+                    </div>
+                  </div>
+
+                  {tab === "register" && (
+                    <>
+                      <div>
+                        <label className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                          Numéro Mobile Money
+                        </label>
+                        <div className="mt-1.5 flex items-center rounded-xl border border-line/10 bg-base/40 focus-within:border-emerald-400/50">
+                          <span className="border-r border-line/10 px-3 py-3 text-sm text-ink-subtle">
+                            +221
+                          </span>
+                          <input
+                            type="tel"
+                            inputMode="numeric"
+                            value={phone}
+                            onChange={(e) => setPhone(formatPhoneInput(e.target.value))}
+                            placeholder="77 123 45 67"
+                            className="w-full bg-transparent px-3 py-3 text-sm outline-none placeholder:text-ink-faint"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+                          Nom de la boutique (optionnel)
+                        </label>
+                        <input
+                          type="text"
+                          value={shopName}
+                          onChange={(e) => setShopName(e.target.value)}
+                          placeholder="Atelier Awa Couture"
+                          className={`mt-1.5 ${inputClass}`}
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {error && (
+                    <p className="rounded-lg border border-rose-500/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-400">
+                      {error}
+                    </p>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="shine relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-xl bg-emerald-500 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {submitting
+                      ? tab === "login"
+                        ? "Connexion…"
+                        : "Création du compte…"
+                      : tab === "login"
+                        ? "Se connecter"
+                        : "Créer mon compte"}
+                    <IconArrow className="h-4 w-4" />
+                  </button>
+                </form>
+
+                <button
+                  type="button"
+                  onClick={() => switchMode("otp")}
+                  className="mt-4 w-full rounded-lg border border-dashed border-line/15 px-3 py-2.5 text-xs text-ink-subtle transition hover:border-emerald-500/40 hover:text-accent"
+                >
+                  Pas de mot de passe ? Se connecter par code SMS
+                </button>
+              </>
+            ) : step === "phone" ? (
               <>
                 <h1 className="mt-5 text-2xl font-bold tracking-tight">Connectez-vous</h1>
                 <p className="mt-2 text-sm text-ink-subtle">
@@ -236,6 +485,14 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
                     <IconArrow className="h-4 w-4" />
                   </button>
                 </form>
+
+                <button
+                  type="button"
+                  onClick={() => switchMode("password")}
+                  className="mt-4 w-full rounded-lg border border-dashed border-line/15 px-3 py-2.5 text-xs text-ink-subtle transition hover:border-emerald-500/40 hover:text-accent"
+                >
+                  Se connecter par email et mot de passe
+                </button>
               </>
             ) : (
               <>
@@ -311,12 +568,16 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
 
             <p className="mt-6 flex items-center justify-center gap-1.5 border-t border-line/5 pt-4 text-center text-[11px] text-ink-faint">
               <IconShield className="h-3.5 w-3.5 text-accent" />
-              Connexion sans mot de passe : votre numéro vous identifie.
+              {mode === "password"
+                ? "Votre compte conserve vos factures et sécurise votre espace."
+                : "Connexion sans mot de passe : votre numéro vous identifie."}
             </p>
           </div>
 
           <p className="mt-5 text-center text-xs text-ink-faint">
-            En continuant, vous acceptez l'usage de votre numéro pour sécuriser votre espace.
+            {mode === "password"
+              ? "Vos données restent liées à votre compte marchand."
+              : "En continuant, vous acceptez l'usage de votre numéro pour sécuriser votre espace."}
           </p>
         </div>
       </main>

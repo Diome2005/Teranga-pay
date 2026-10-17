@@ -161,6 +161,8 @@ export default function CheckoutPage({ invoiceId, justPaid, onViewChange }) {
   useEffect(() => {
     if (status !== "pending") return undefined;
 
+    let backendDown = false;
+
     const timer = setInterval(async () => {
       pollCount.current += 1;
       let paid = false;
@@ -168,12 +170,15 @@ export default function CheckoutPage({ invoiceId, justPaid, onViewChange }) {
       try {
         const data = await getPaymentStatus(invoice.id);
         paid = data.status === "paid" || data.status === "confirmed";
+        backendDown = false;
       } catch {
         // backend indisponible -> mode démo
+        backendDown = true;
       }
 
-      // Mode démo : paiement simulé après ~12 s (3 cycles de 4 s)
-      if (!paid && pollCount.current >= 3) paid = true;
+      // Mode démo autonome : on ne simule le paiement (~12 s) que si le backend est
+      // indisponible. Sinon on continue d'attendre le paiement réel sans le déclencher à tort.
+      if (!paid && backendDown && pollCount.current >= 3) paid = true;
 
       if (paid) confirmPayment();
     }, 4000);

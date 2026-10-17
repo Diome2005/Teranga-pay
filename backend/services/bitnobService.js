@@ -15,6 +15,7 @@ const axios = require("axios");
 const BITNOB_BASE_URL = process.env.BITNOB_BASE_URL || "https://api.bitnob.com";
 const CLIENT_ID = process.env.BITNOB_CLIENT_ID;
 const CLIENT_SECRET = process.env.BITNOB_CLIENT_SECRET;
+const DEMO_MODE = process.env.DEMO_MODE === "true";
 
 // Génère un nonce cryptographique de 16 octets (hex) — unicité par requête.
 function generateNonce() {
@@ -65,19 +66,49 @@ async function whoami() {
 // POST /api/customers — crée un profil client.
 // Requis : email, customer_type ('individual' | 'business').
 async function createCustomer(payload) {
+  if (DEMO_MODE) return { data: { id: `demo_customer_${crypto.randomUUID()}` } };
   return signedRequest("POST", "/api/customers", payload);
+}
+
+// [DEMO] : facture Lightning simulée (DEMO_MODE=true) — aucun appel réseau.
+// La forme imite la réponse réelle (request = BOLT11, amount_sat, status…).
+function fakeInvoice(payload) {
+  return {
+    id: `demo_${crypto.randomUUID()}`,
+    payment_hash: crypto.randomBytes(32).toString("hex"),
+    request: `lnbc${payload.amount}n1` + crypto.randomBytes(32).toString("hex"),
+    amount_sat: String(payload.amount),
+    description: payload.description || "",
+    status: "pending",
+    reference: payload.reference || "",
+    expires_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+    created_at: new Date().toISOString(),
+  };
 }
 
 // POST /api/lightning/invoices — génère une facture Lightning (BOLT11).
 // Requis : amount (sats), description, reference (clé d'idempotence).
 // Optionnel : customer_id, expiry (secondes).
 async function createLightningInvoice(payload) {
+  if (DEMO_MODE) return fakeInvoice(payload);
   return signedRequest("POST", "/api/lightning/invoices", payload);
 }
 
 // GET /api/lightning/invoices/:id — détail/statut d'une facture.
 async function getLightningInvoice(id) {
+  if (DEMO_MODE) return null;
   return signedRequest("GET", `/api/lightning/invoices/${id}`);
+}
+
+// POST /api/lightning/invoices/:id/simulate-payment — (sandbox uniquement) déclenche un
+//   paiement simulé sur une facture Lightning ouverte. Provoque l'émission d'un webhook
+//   btc.lightning.received.success (~2 s) côté Bitnob, qui pilote ensuite la liquidation.
+//   La facture doit être impayée et non expirée (sinon 4xx).
+async function simulateLightningPayment(invoiceId) {
+  if (!invoiceId) {
+    throw new Error("simulateLightningPayment : le champ 'invoiceId' est requis.");
+  }
+  return signedRequest("POST", `/api/lightning/invoices/${invoiceId}/simulate-payment`);
 }
 
 // Vérifie la signature d'un webhook Bitnob.
@@ -299,6 +330,7 @@ module.exports = {
   createCustomer,
   createLightningInvoice,
   getLightningInvoice,
+  simulateLightningPayment,
   verifyWebhookSignature,
   getPayoutBanks,
   createPayoutQuote,

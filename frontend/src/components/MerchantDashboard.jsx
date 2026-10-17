@@ -719,7 +719,9 @@ export default function MerchantDashboard({
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [provider, setProvider] = useState(PROVIDERS[0].id);
-  const [phone, setPhone] = useState("");
+  // Prérempli avec le numéro du compte connecté (le backend impose de toute
+  // façon le numéro de la session : une facture appartient toujours au compte).
+  const [phone, setPhone] = useState(() => phoneDigits(session?.phone || ""));
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState("");
@@ -758,7 +760,7 @@ export default function MerchantDashboard({
     const digits = phoneDigits(session?.phone || "");
     if (!digits) return; // mode démo sans numéro : pas d'appel
     let cancelled = false;
-    listPaymentLinks({ merchantPhone: digits })
+    listPaymentLinks({ merchantPhone: digits }, session?.token)
       .then((res) => {
         if (cancelled) return;
         const remote = Array.isArray(res?.invoices) ? res.invoices.map(fromApi) : [];
@@ -766,12 +768,12 @@ export default function MerchantDashboard({
         setInvoices((prev) => mergeInvoices(prev, remote));
       })
       .catch(() => {
-        /* backend indisponible : on garde l'historique local */
+        /* backend indisponible ou non authentifié : on garde l'historique local */
       });
     return () => {
       cancelled = true;
     };
-  }, [storageKey, session?.phone]);
+  }, [storageKey, session?.phone, session?.token]);
 
   const stats = useMemo(() => {
     const paid = invoices.filter((i) => i.status === "paid");
@@ -852,16 +854,19 @@ export default function MerchantDashboard({
 
     let invoice;
     try {
-      const remote = await createPaymentLink({
-        merchantPhone: phoneDigits(phone),
-        provider: providerObj.id,
-        amountXOF: value,
-        description: description.trim(),
-        merchant: shop,
-      });
+      const remote = await createPaymentLink(
+        {
+          merchantPhone: phoneDigits(phone),
+          provider: providerObj.id,
+          amountXOF: value,
+          description: description.trim(),
+          merchant: shop,
+        },
+        session?.token
+      );
       invoice = fromApi(remote);
     } catch {
-      // Backend indisponible -> repli local (mode démo autonome)
+      // Backend indisponible (ou non authentifié) -> repli local (mode démo autonome)
       invoice = createInvoice(value, description, providerObj, phone, shop);
       showToast("Backend indisponible — facture enregistrée localement.");
     } finally {

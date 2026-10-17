@@ -22,7 +22,9 @@ const store = require("./services/store");
 
 const app = express();
 
-app.use(cors());
+// [SÉCURITÉ] : autoriser uniquement l'origine du frontend (CORS restreint).
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+app.use(cors({ origin: FRONTEND_URL }));
 // On conserve le corps brut (Buffer) pour vérifier la signature du webhook.
 app.use(
   express.json({
@@ -339,7 +341,7 @@ app.get("/api/whoami", async (req, res) => {
 //   reference    (optionnel — clé d'idempotence, générée sinon)
 //   [ÉTAPE 5] merchantPhone / provider / amountXOF / merchant
 //              — coordonnées de liquidation Mobile Money du marchand
-app.post("/api/invoices", async (req, res) => {
+app.post("/api/invoices", requireMerchant, async (req, res) => {
   try {
     const {
       amount,
@@ -348,11 +350,14 @@ app.post("/api/invoices", async (req, res) => {
       customer_id,
       expiry,
       reference,
-      merchantPhone,
       provider,
       amountXOF,
-      merchant,
     } = req.body || {};
+
+    // Le marchand est identifié par la session (compte email/mot de passe ou OTP) —
+    // on ignore tout merchantPhone/merchant du body pour éviter l'usurpation.
+    const merchantPhone = req.session.phone;
+    const merchant = req.session.shop || "Marchand Teranga";
 
     if (!description) {
       return res.status(400).json({
@@ -417,8 +422,8 @@ app.post("/api/invoices", async (req, res) => {
       description,
       amountSat,
       amountXOF: amountXOF ? Number(amountXOF) : null,
-      merchant: merchant || null,
-      merchantPhone: merchantPhone || null,
+      merchant,
+      merchantPhone,
       provider: provider || null,
       customerId,
       bolt11: paymentRequest || null,
@@ -452,23 +457,26 @@ app.post("/api/invoices", async (req, res) => {
   }
 });
 
-// GET /api/invoices — liste des factures du registre (plus récentes en premier).
-//   Query optionnels : merchantPhone | phone (filtre numéro marchand),
-//                      merchant (nom), status (pending | paid).
-app.get("/api/invoices", (req, res) => {
-  const phone = String(req.query.merchantPhone || req.query.phone || "").replace(/\D/g, "");
+// GET /api/invoices — liste des factures DU MARCHAND CONNECTÉ
+// (plus récentes en premier). Requiert le header Authorization: Bearer <token>.
+//   Query optionnels : merchant (nom), status (pending | paid).
+app.get("/api/invoices", requireMerchant, (req, res) => {
+  const sessionPhone = String(req.session.phone || "").replace(/\D/g, "");
   const merchant = String(req.query.merchant || "").trim().toLowerCase();
   const status = String(req.query.status || "").trim().toLowerCase();
 
   let list = [...invoicesStore.values()];
 
-  if (phone) {
-    const target = phone.length > 9 ? phone.slice(-9) : phone;
+  // [SÉCURITÉ] : un marchand ne voit que ses propres factures. Le filtre est
+  // dérivé de la session (jamais du body/query) pour empêcher l'usurpation.
+  if (sessionPhone) {
+    const target = sessionPhone.length > 9 ? sessionPhone.slice(-9) : sessionPhone;
     list = list.filter((e) => {
       const digits = String(e.merchantPhone || "").replace(/\D/g, "");
       return digits.endsWith(target);
     });
   }
+
   if (merchant) {
     list = list.filter((e) => String(e.merchant || "").toLowerCase().includes(merchant));
   }
@@ -532,26 +540,53 @@ app.get("/api/invoices/:id/status", async (req, res) => {
   res.json({ success: true, ...normalizeInvoice(entry) });
 });
 
-// POST /api/invoices/:id/simulate-card — (démo) encaissement sans paiement réel.
-//   Réservé à DEMO_MODE=true : marque la facture payée et lance la liquidation
-//   simulée, comme le ferait le webhook Bitnob.
-app.post("/api/invoices/:id/simulate-card", (req, res) => {
-  if (process.env.DEMO_MODE !== "true") {
-    return res.status(403).json({
-      success: false,
-      error: "Simulation réservée au mode démo (DEMO_MODE=true).",
-    });
-  }
-
+// POST /api/invoices/:id/simulate-card — encaissement simulé (sans carte réelle).
+//   - DEMO_MODE=true  : marque la facture payée localement + liquidation simulée.
+//   - Sinon (sandbox avec clés réelles) : appelle l'endpoint sandbox Bitnob
+//     POST /api/lightning/invoices/:id/simulate-payment, qui déclenche un vrai
+//     webhook btc.lightning.received.success -> liquidation FCFA réelle.
+app.post("/api/invoices/:id/simulate-card", async (req, res) => {
   const entry = findInvoice(req.params.id);
   if (!entry) {
     return res
       .status(404)
       .json({ success: false, error: `Facture "${req.params.id}" introuvable.` });
   }
+  if (entry.status === "paid") {
+    return res.status(409).json({ success: false, error: "Cette facture est déjà payée." });
+  }
 
-  markInvoicePaid(entry, "simulate-card");
-  res.json({ success: true, ...normalizeInvoice(entry) });
+  // Mode démo : simulation locale (aucune requête réseau).
+  if (process.env.DEMO_MODE === "true") {
+    markInvoicePaid(entry, "simulate-card");
+    return res.json({ success: true, ...normalizeInvoice(entry) });
+  }
+
+  // Mode réel (sandbox) : déclencher un vrai paiement simulé côté Bitnob.
+  if (!entry.invoiceId) {
+    return res.status(400).json({
+      success: false,
+      error: "Facture sans invoiceId Bitnob — simulation réelle impossible.",
+    });
+  }
+
+  try {
+    const result = await bitnob.simulateLightningPayment(entry.invoiceId);
+    return res.json({
+      success: true,
+      simulated: true,
+      message: "Paiement simulé côté Bitnob — webhook btc.lightning.received.success en attente.",
+      invoiceId: entry.invoiceId,
+      ...(result?.data || {}),
+    });
+  } catch (error) {
+    const { status, details } = bitnobError(error);
+    console.error(
+      `[teranga-pay] Simulation Bitnob ERREUR (${status}) :`,
+      JSON.stringify(details)
+    );
+    return res.status(status).json({ success: false, status, error: details });
+  }
 });
 
 // POST /api/webhooks/bitnob — réception des notifications Bitnob.
@@ -624,8 +659,46 @@ app.get("/api/webhooks/bitnob", (req, res) => {
 });
 
 // ==================================================================
-// [ÉTAPE 6] — Auth passwordless (OTP par numéro Mobile Money)
+// [ÉTAPE 6] — Auth marchand : email + mot de passe (compte) et OTP passwordless
 // ==================================================================
+
+// POST /api/auth/register — création d'un compte marchand (email + mot de passe).
+// Body : { email, password, phone, shop? }
+app.post("/api/auth/register", async (req, res) => {
+  const { email, password, phone, shop } = req.body || {};
+  try {
+    const result = await auth.register({ email, password, phone, shop });
+    if (!result.ok) return res.status(400).json({ success: false, error: result.error });
+    res.status(201).json({
+      success: true,
+      email: result.email,
+      phone: result.phone,
+      session: result.session,
+    });
+  } catch (error) {
+    console.error("[teranga-pay] register erreur :", error.message || error);
+    res.status(500).json({ success: false, error: "Impossible de créer le compte." });
+  }
+});
+
+// POST /api/auth/login — connexion par email + mot de passe.
+// Body : { email, password }
+app.post("/api/auth/login", (req, res) => {
+  const { email, password } = req.body || {};
+  try {
+    const result = auth.login({ email, password });
+    if (!result.ok) return res.status(401).json({ success: false, error: result.error });
+    res.status(200).json({
+      success: true,
+      email: result.email,
+      phone: result.phone,
+      session: result.session,
+    });
+  } catch (error) {
+    console.error("[teranga-pay] login erreur :", error.message || error);
+    res.status(500).json({ success: false, error: "Impossible de se connecter." });
+  }
+});
 
 // POST /api/auth/otp — demande un code de vérification pour un numéro.
 // Body : { phone, shop? }
@@ -766,6 +839,14 @@ const PORT = process.env.PORT || 5000;
 
 // [ÉTAPE 6] Exécution directe => on écoute. Import (tests) => on exporte l'app sans écouter.
 if (require.main === module) {
+  // [GARDE-FOU] en production, DEMO_MODE=true est refusé : le mode démo simule
+  // factures et payouts sans transfert réel de fonds — dangereux en prod.
+  if (process.env.NODE_ENV === "production" && process.env.DEMO_MODE === "true") {
+    console.error("[teranga-pay] REFUS DE DÉMARRER : DEMO_MODE=true est interdit en production.");
+    console.error("[teranga-pay] Positionnez DEMO_MODE=false pour servir de vrais paiements.");
+    process.exit(1);
+  }
+
   app.listen(PORT, () => {
     console.log(`[teranga-pay] Serveur backend démarré sur http://localhost:${PORT}`);
     console.log(`[teranga-pay] Mode : DEMO_MODE=${process.env.DEMO_MODE} · Stripe=${stripe.isConfigured() ? "configuré" : "non configuré"}`);

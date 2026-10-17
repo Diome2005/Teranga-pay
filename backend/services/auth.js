@@ -19,6 +19,8 @@ const MAX_ATTEMPTS = 5;
 const otps = collection("otps");
 const sessions = collection("sessions");
 const merchants = collection("merchants");
+// Comptes marchand email/mot de passe (clé : email normalisé).
+const accounts = collection("accounts");
 
 function nowMs() {
   return Date.now();
@@ -176,6 +178,86 @@ function pruneExpired() {
   return otps.pruneExpired() + sessions.pruneExpired();
 }
 
+// ==================================================================
+// [COMPTE] — inscription / connexion par email + mot de passe.
+// [CHOIX] : hash du mot de passe via crypto.scrypt (intégré à Node) au lieu de bcrypt —
+//   aucune dépendance native, niveau de sécurité équivalent (sel aléatoire + comparaison
+//   à temps constant). Le numéro Mobile Money reste l'identité de liquidation.
+// ==================================================================
+
+const PW_MIN_LENGTH = 8;
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+// Hache un mot de passe : "salt:hash" (hex). Le sel est unique par compte.
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(String(password), salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+
+// Vérifie un mot de passe contre un hash stocké, en temps constant.
+function verifyPassword(password, stored) {
+  if (!stored) return false;
+  const [salt, hash] = String(stored).split(":");
+  if (!salt || !hash) return false;
+  const computed = crypto.scryptSync(String(password), salt, 64);
+  const expected = Buffer.from(hash, "hex");
+  if (computed.length !== expected.length) return false;
+  return crypto.timingSafeEqual(computed, expected);
+}
+
+// Crée un compte marchand et ouvre une session.
+async function register({ email, password, phone, shop }) {
+  const e = normalizeEmail(email);
+  if (!isValidEmail(e)) return { ok: false, error: "Adresse email invalide." };
+  if (!password || String(password).length < PW_MIN_LENGTH) {
+    return { ok: false, error: `Le mot de passe doit faire au moins ${PW_MIN_LENGTH} caractères.` };
+  }
+  if (!isValidSenegalPhone(phone)) {
+    return { ok: false, error: "Numéro Mobile Money invalide (format 9 chiffres, Sénégal)." };
+  }
+  const p = normalizePhone(phone);
+  if (accounts.has(e)) {
+    return { ok: false, error: "Un compte existe déjà pour cet email." };
+  }
+
+  const shopName = shop || "Atelier Awa Couture";
+  const account = {
+    email: e,
+    passwordHash: hashPassword(password),
+    phone: p,
+    shop: shopName,
+    createdAt: new Date().toISOString(),
+  };
+  accounts.set(e, account);
+
+  // Fiche marchand cohérente (consommée par /merchants/me).
+  if (!merchants.has(p)) {
+    merchants.set(p, { phone: p, shop: shopName, email: e, createdAt: account.createdAt });
+  }
+
+  const session = createSession(p, shopName);
+  return { ok: true, email: e, phone: p, session };
+}
+
+// Connecte un marchand par email + mot de passe.
+function login({ email, password }) {
+  const e = normalizeEmail(email);
+  const account = accounts.get(e);
+  if (!account || !verifyPassword(password, account.passwordHash)) {
+    return { ok: false, error: "Email ou mot de passe incorrect." };
+  }
+  const session = createSession(account.phone, account.shop);
+  return { ok: true, email: e, phone: account.phone, session };
+}
+
 module.exports = {
   normalizePhone,
   isValidSenegalPhone,
@@ -186,4 +268,10 @@ module.exports = {
   getMerchant,
   updateMerchant,
   pruneExpired,
+  normalizeEmail,
+  isValidEmail,
+  hashPassword,
+  verifyPassword,
+  register,
+  login,
 };

@@ -6,6 +6,7 @@
 process.env.DATA_DIR = require("os").tmpdir() + require("path").sep + "teranga-test-" + Date.now();
 process.env.DEMO_MODE = "true";
 process.env.BITNOB_WEBHOOK_SECRET = "test_bitnob_secret";
+process.env.BITNOB_CLIENT_SECRET = "test_bitnob_client_secret";
 process.env.STRIPE_WEBHOOK_SECRET = "whsec_test_secret";
 // Chaîne vide (et non suppression) : dotenv ne réécrit pas une clé déjà présente,
 // ce qui force bien le service carte "non configuré" pour le test 503.
@@ -85,6 +86,125 @@ test("Auth OTP : code invalide rejeté", async () => {
   await jsonFetch("/api/auth/otp", { method: "POST", body: { phone } });
   const bad = await jsonFetch("/api/auth/otp/verify", { method: "POST", body: { phone, code: "000000" } });
   assert.equal(bad.status, 401);
+});
+
+// ------------------------------------------------- comptes (email + mot de passe)
+test("Auth compte : inscription -> session -> profil protégé", async () => {
+  const email = `awa+${Date.now()}@teranga.sn`;
+  const reg = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { email, password: "motdepasse123", phone: "770001122", shop: "Boutique Compte" },
+  });
+  assert.equal(reg.status, 201);
+  assert.equal(reg.data.success, true);
+  assert.equal(reg.data.email, email);
+  assert.ok(reg.data.session?.token, "un jeton de session doit être renvoyé");
+
+  const me = await jsonFetch("/api/merchants/me", {
+    headers: { Authorization: `Bearer ${reg.data.session.token}` },
+  });
+  assert.equal(me.status, 200);
+  assert.equal(me.data.session.phone, "+221770001122");
+});
+
+test("Auth compte : email dupliqué et mot de passe erroné rejetés, login valide OK", async () => {
+  const email = `dup+${Date.now()}@teranga.sn`;
+  const first = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { email, password: "motdepasse123", phone: "770002233" },
+  });
+  assert.equal(first.status, 201);
+
+  const dup = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { email, password: "motdepasse456", phone: "770002244" },
+  });
+  assert.equal(dup.status, 400);
+
+  const bad = await jsonFetch("/api/auth/login", {
+    method: "POST",
+    body: { email, password: "mauvais-mdp" },
+  });
+  assert.equal(bad.status, 401);
+
+  const ok = await jsonFetch("/api/auth/login", {
+    method: "POST",
+    body: { email, password: "motdepasse123" },
+  });
+  assert.equal(ok.status, 200);
+  assert.ok(ok.data.session?.token, "le login doit renvoyer un jeton");
+});
+
+test("Auth compte : validations (email, mot de passe court, téléphone)", async () => {
+  const base = { email: `val+${Date.now()}@teranga.sn`, password: "motdepasse123", phone: "770005566" };
+  const badEmail = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { ...base, email: "pas-un-email" },
+  });
+  assert.equal(badEmail.status, 400);
+
+  const shortPw = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { ...base, password: "court" },
+  });
+  assert.equal(shortPw.status, 400);
+
+  const badPhone = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { ...base, phone: "123" },
+  });
+  assert.equal(badPhone.status, 400);
+});
+
+// ------------------------------------------------- factures scopées au compte
+test("Factures : 401 sans jeton, création/liste scopées au compte connecté", async () => {
+  const email = `scope+${Date.now()}@teranga.sn`;
+  const reg = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { email, password: "motdepasse123", phone: "770003344", shop: "Atelier Scope" },
+  });
+  const token = reg.data.session.token;
+
+  // Sans jeton -> 401 (création comme liste).
+  const anonList = await jsonFetch("/api/invoices");
+  assert.equal(anonList.status, 401);
+  const anonCreate = await jsonFetch("/api/invoices", {
+    method: "POST",
+    body: { amountXOF: 5000, description: "Anonyme" },
+  });
+  assert.equal(anonCreate.status, 401);
+
+  // Création authentifiée (DEMO_MODE : Bitnob simulé, aucun appel réseau).
+  // Un tentative d'usurpation via le body est ignorée : le marchand vient de la session.
+  const created = await jsonFetch("/api/invoices", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: {
+      amountXOF: 5000,
+      description: "Facture scopée (test)",
+      merchantPhone: "770000000",
+      merchant: "Autre Marchand",
+    },
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.merchantPhone, "+221770003344");
+  assert.equal(created.data.merchant, "Atelier Scope");
+
+  // La liste du compte contient cette facture.
+  const list = await jsonFetch("/api/invoices", { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal(list.status, 200);
+  assert.ok(list.data.invoices.some((i) => i.description === "Facture scopée (test)"));
+
+  // Un autre compte ne la voit pas.
+  const other = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { email: `other+${Date.now()}@teranga.sn`, password: "motdepasse123", phone: "770009988" },
+  });
+  const otherList = await jsonFetch("/api/invoices", {
+    headers: { Authorization: `Bearer ${other.data.session.token}` },
+  });
+  assert.equal(otherList.status, 200);
+  assert.ok(!otherList.data.invoices.some((i) => i.description === "Facture scopée (test)"));
 });
 
 // ---------------------------------------------------------------- webhook Bitnob

@@ -11,15 +11,20 @@ const api = axios.create({
   headers: { "Content-Type": "application/json" },
 });
 
-// Créer un lien de paiement marchand
-export async function createPaymentLink(payload) {
-  const { data } = await api.post("/invoices", payload);
+// Jeton de session (Bearer) pour les routes marchand protégées.
+function authHeaders(token) {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// Créer un lien de paiement marchand (protégé : jeton requis)
+export async function createPaymentLink(payload, token) {
+  const { data } = await api.post("/invoices", payload, { headers: authHeaders(token) });
   return data;
 }
 
-// Lister les liens d'un marchand (filtre optionnel par numéro)
-export async function listPaymentLinks(params) {
-  const { data } = await api.get("/invoices", { params });
+// Lister les liens DU MARCHAND connecté (protégé : jeton requis)
+export async function listPaymentLinks(params, token) {
+  const { data } = await api.get("/invoices", { params, headers: authHeaders(token) });
   return data;
 }
 
@@ -41,7 +46,19 @@ export async function simulateCardPayment(id) {
   return data;
 }
 
-// --- Étape 6 : auth passwordless (OTP) ---
+// --- Étape 6 : auth marchand (email + mot de passe, et OTP passwordless) ---
+
+// Crée un compte marchand (email + mot de passe + numéro Mobile Money)
+export async function register(payload) {
+  const { data } = await api.post("/auth/register", payload);
+  return data;
+}
+
+// Connexion par email + mot de passe → session (jeton)
+export async function login(payload) {
+  const { data } = await api.post("/auth/login", payload);
+  return data;
+}
 
 // Demande un code OTP pour un numéro Mobile Money
 export async function requestOtp(payload) {
@@ -56,10 +73,6 @@ export async function verifyOtp(payload) {
 }
 
 // --- Étape 6 : profil marchand (protégé par jeton) ---
-
-function authHeaders(token) {
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
 
 export async function getMerchant(token) {
   const { data } = await api.get("/merchants/me", { headers: authHeaders(token) });
