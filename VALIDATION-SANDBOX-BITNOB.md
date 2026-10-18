@@ -8,7 +8,8 @@ les inconnues listées dans le README (« À confirmer avant mise en production 
 > `lntb…` créée ✅ ; codes réseau SN `orange`/`free`/`expresso`/`wave` ✅ (`MOBILE_MONEY_NETWORKS`
 > corrigé) ; simulate-payment accepté → facture `paid` ✅ ; chaîne payout réelle validée en
 > direct (quote 100 XOF → initialize `orange` + `sender` → finalize `PENDING`, `sandbox_txn_…`) ✅.
-> Restent : webhook réel via ngrok (étapes 1-5) et dédup `event_id`.
+> Dédup `event_id` implémentée et testée hors-ligne ✅ (registre `webhook_events`).
+> Reste : webhook réel via ngrok (étapes 1-5).
 
 > Sandbox uniquement : ne jamais utiliser de clés de production pour ces tests.
 
@@ -75,10 +76,12 @@ Invoke-RestMethod https://<id>.ngrok.app/api/webhooks/bitnob
 
 ## 2. Valider l'authentification API (`GET /api/whoami`)
 
-Route : `backend/server.js:317` → teste clés + signature HMAC sortante.
+Route : `backend/server.js` → teste clés + signature HMAC sortante.
+Depuis le durcissement, la route exige un **jeton marchand** : faire d'abord l'étape 4
+(créer le compte et récupérer `$token`), puis :
 
 ```powershell
-Invoke-RestMethod http://localhost:5000/api/whoami
+Invoke-RestMethod http://localhost:5000/api/whoami -Headers @{ Authorization = "Bearer $token" }
 ```
 
 - Attendu : **200** + infos du client Bitnob.
@@ -87,12 +90,18 @@ Invoke-RestMethod http://localhost:5000/api/whoami
 ## 3. Brancher le webhook dans le dashboard Bitnob
 
 - URL : `https://<id>.ngrok.app/api/webhooks/bitnob`
-- Activer les événements Lightning (`btc.lightning.received.success`) et Payouts
-  (`payouts.withdrawal.success` / `.expired`).
+- Activer les événements Dépôt Lightning (`deposit.success`) et Payouts (`payouts.*`).
+- **Un seul webhook suffit** : un ancien webhook encore actif (autre secret) livre en plus
+  des événements qui seront rejetés en 401. Supprimer l'ancien — ou, si nécessaire, empiler
+  les secrets : `BITNOB_WEBHOOK_SECRET=secret_ancien,secret_courant` (séparés par une
+  virgule, tous acceptés par `verifyWebhookSignature`).
 - Dès le premier événement reçu, `WEBHOOK_DEBUG=true` journalise le couple
-  **secret × algorithme** qui valide la signature (le code teste les 4 combinaisons —
-  voir `verifyWebhookSignature`, `backend/services/bitnobService.js:124`).
-  Attendu : `BITNOB_WEBHOOK_SECRET` × `sha512`.
+  **secret × algorithme** qui valide la signature (le code teste toutes les combinaisons :
+  secrets × SHA-512/SHA-256 — voir `verifyWebhookSignature` dans
+  `backend/services/bitnobService.js`). Attendu : `BITNOB_WEBHOOK_SECRET` × `sha512`.
+- Le sandbox signe chaque événement avec le secret **du webhook qui le délivre** : si la
+  signature est rejetée alors que `WEBHOOK_DEBUG` affiche « Aucune combinaison ne matche »,
+  c'est qu'un second webhook (autre secret) livre cet événement.
 
 ## 4. Créer un compte marchand + une facture réelle
 
@@ -120,28 +129,33 @@ Contrôles :
 ## 5. Payer la facture (simulate-payment) et suivre le flux
 
 `POST /api/invoices/:id/simulate-card` appelle le vrai endpoint sandbox
-`/api/lightning/invoices/:id/simulate-payment` (`backend/server.js:548`).
+`/api/lightning/invoices/:id/simulate-payment`. La route est **réservée au marchand
+propriétaire** (`Bearer` obligatoire, la facture doit appartenir à la session).
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri "http://localhost:5000/api/invoices/<reference>/simulate-card"
+Invoke-RestMethod -Method Post -Uri "http://localhost:5000/api/invoices/<reference>/simulate-card" `
+  -Headers @{ Authorization = "Bearer $token" }
 # attendu : { simulated = true, message = "Paiement simulé côté Bitnob — webhook ... en attente." }
 ```
 
 Puis surveiller les logs du serveur (Terminal 1) :
 
-1. `PAIEMENT LIGHTNING CONFIRMÉ` (webhook `btc.lightning.received.success`, ~2 s) ;
-2. `LIQUIDATION FCFA SOUMISE` (quote → initialize → finalize réels, `backend/server.js:195`) ;
+1. `PAIEMENT LIGHTNING CONFIRMÉ` (webhook `deposit.success`, ~2 s — ou
+   `Facture … marquée PAYÉE (source=polling-bitnob)` si le webhook est rejeté) ;
+2. `LIQUIDATION FCFA SOUMISE` (quote → initialize → finalize réels, `liquidateMerchantPayout` dans `backend/server.js`) ;
 
 puis vérifier l'état :
 
 ```powershell
 Invoke-RestMethod "http://localhost:5000/api/invoices/<reference>/status"
 # attendu : status = "paid", payoutStatus = "done" (soumis),
-#           payout.status = PENDING → COMPLETED via webhook payouts.withdrawal.success
+#           puis "completed" via webhook payouts.* signé
 ```
 
 En cas d'échec de liquidation, `payoutStatus = "failed"` et `payoutError` contient le détail
-Bitnob (status HTTP + payload d'erreur).
+Bitnob (status HTTP + payload d'erreur). Après un ou deux payouts sandbox, le solde de
+démonstration peut être épuisé (`INSUFFICIENT_FUNDS`) : recharger le compte sandbox Bitnob
+avant de rejouer.
 
 ## 6. Trancher les inconnues (sans ngrok, depuis `backend/`)
 
@@ -172,13 +186,15 @@ pour `mobile_money` — `bank_code` ne concerne pas ce destination type. Le grou
 (`backend/services/bitnobService.js:198`). Validation réelle : quote → initialize → finalize
 acceptés en direct contre le sandbox (statut `PENDING`, `provider_settlement_id: sandbox_txn_…`).
 
-### 6d. Déduplication webhook (`event_id`)
+### 6d. Déduplication webhook (`event_id`) — ✅ implémentée
 
-- Repérer dans les logs l'en-tête `x-bitnob-event-id` (le debug webhook les journalise).
-- Aujourd'hui l'idempotence repose sur les gardes de statut (`payoutStatus`,
-  `markInvoicePaid` — anti double-payout). Si le sandbox renvoie des doublons du même
-  `event_id`, ajouter un registre des événements traités dans la route webhook
-  (`backend/server.js:600`), par ex. une collection `store` dédiée.
+- Registre persistant `webhook_events` (store JSON, TTL 7 jours, purge périodique) :
+  clé = en-tête `x-bitnob-event-id`, repli **SHA-256 du corps brut** si absent (sandbox).
+- Un doublon reçoit un `200 { duplicate: true }` et n'est **jamais retraité**
+  (pas de double liquidation), en plus des gardes de statut (`payoutStatus`,
+  `markInvoicePaid`).
+- Vérifié hors-ligne par `npm test` ; à confirmer en réel en rejouant deux fois le même
+  événement sandbox et en comptant un seul `LIQUIDATION FCFA SOUMISE` dans les logs.
 
 ## 7. Table de correction (si écart constaté)
 
@@ -187,9 +203,9 @@ acceptés en direct contre le sandbox (statut `PENDING`, `provider_settlement_id
 | Codes `network` SN | `backend/services/bitnobService.js:143` (`MOBILE_MONEY_NETWORKS`) | ✅ fait (2026-10-17) — `orange` / `free` / `expresso` / `wave` |
 | `network` vs `bank_code` | `backend/services/bitnobService.js:198` (`initializePayout`) | ✅ fait — `network` + groupe `sender` requis |
 | `payment_reason` SN | `backend/.env` (`PAYOUT_PAYMENT_REASON`) | ✅ fait — `goods_and_services` accepté au quote/initialize (sandbox) |
-| Dédup `event_id` | `backend/server.js:600` (route webhook) | ajouter un registre `event_id` si doublons observés |
+| Dédup `event_id` | `backend/server.js` (route webhook) | ✅ fait — registre `webhook_events` (event_id ou SHA-256 du corps, TTL 7 j) |
 
-Après toute correction : relancer `npm test` (backend, 18/18 attendus) puis rejouer l'étape 5.
+Après toute correction : relancer `npm test` (backend, 20/20 attendus) puis rejouer l'étape 5.
 
 ## 8. Critères de réussite
 
@@ -202,7 +218,7 @@ Après toute correction : relancer `npm test` (backend, 18/18 attendus) puis rej
 - [ ] `status = paid` et `payoutStatus = done` via le flux complet de l'app (webhook)
 - [x] Codes réseau SN confirmés et corrigés dans `MOBILE_MONEY_NETWORKS`
 - [x] Champ bénéficiaire confirmé (`network` + `sender`)
-- [ ] Aucun doublon de liquidation constaté (guardes de statut suffisantes ou dédup ajoutée)
+- [x] Dédup `event_id` implémentée et testée hors-ligne (registre `webhook_events`, TTL 7 j)
 
 ## 9. Nettoyage après validation
 

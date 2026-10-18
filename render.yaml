@@ -16,12 +16,10 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "20"
-      # Production réelle : NODE_ENV=production + DEMO_MODE=false (le backend refuse
-      # DEMO_MODE=true en production). Les paiements/liq. passent par Bitnob (clés ci-dessous).
+      # Aucun mode démo : tous les paiements/liquidations passent par Bitnob
+      # (les clés ci-dessous sont requises pour un déploiement fonctionnel).
       - key: NODE_ENV
         value: production
-      - key: DEMO_MODE
-        value: "false"
       # URL publique du frontend (CORS restreint). À remplacer par l'URL du site static.
       - key: FRONTEND_URL
         sync: false
@@ -39,14 +37,9 @@ services:
         sync: false
       - key: BITNOB_WEBHOOK_SECRET
         sync: false
-      # --- Stripe (carte) : optionnel ---
-      - key: STRIPE_SECRET_KEY
-        sync: false
-      - key: STRIPE_WEBHOOK_SECRET
-        sync: false
       # --- Divers ---
       - key: XOF_PER_BTC
-        value: "60000000"
+        value: "48500000"
       - key: PAYOUT_PAYMENT_REASON
         value: goods_and_services
       - key: WEBHOOK_DEBUG

@@ -4,9 +4,10 @@
 // [ÉTAPE 2] : GET /api/whoami — test d'authentification Bitnob.
 // [ÉTAPE 3] : POST /api/invoices — crée un client (si besoin) + facture Lightning.
 // [ÉTAPE 4] : POST /api/webhooks/bitnob — réception des notifications de paiement.
-// [ÉTAPE 5] : liquidation Mobile Money — à la réception de
-//   btc.lightning.received.success, payout FCFA automatique vers le numéro
-//   du marchand (Wave / Orange Money / Free Money) via le flux payouts Bitnob.
+// [ÉTAPE 5] : liquidation Mobile Money — à la réception du webhook de paiement
+//   Lightning (deposit.success — alias historique btc.lightning.received.success),
+//   payout FCFA automatique vers le numéro du marchand (Wave / Orange Money /
+//   Free Money) via le flux payouts Bitnob.
 // [ÉTAPE 6] : persistance (store JSON) et auth passwordless (OTP).
 
 require("dotenv").config();
@@ -55,6 +56,24 @@ function toInternationalPhone(phone) {
 // liquidater. Survit au redémarrage grâce au store JSON (services/store.js).
 const invoicesStore = store.collection("invoices");
 
+// Registre des webhooks Bitnob déjà traités (dédup sur event_id).
+// Bitnob peut réémettre le même événement (retry réseau, ou plusieurs webhooks
+// configurés dans le dashboard) : sans ce registre, un second webhook de paiement
+// déclencherait une seconde liquidation FCFA pour la même facture. TTL 7 jours.
+const webhookEventsStore = store.collection("webhook_events");
+const WEBHOOK_EVENT_TTL_MS = 7 * 24 * 3600 * 1000;
+
+// Clé de dédup d'un webhook : en-tête x-bitnob-event-id, sinon event_id présent
+// dans le corps (sandbox : { event_id: "…" }), sinon empreinte SHA-256 du brut.
+function webhookEventKey(req) {
+  const header = req.get("x-bitnob-event-id");
+  if (header && String(header).trim()) return String(header).trim();
+  const payloadId = req.body?.event_id || req.body?.data?.event_id;
+  if (payloadId && String(payloadId).trim()) return String(payloadId).trim();
+  const raw = req.rawBody || Buffer.from("");
+  return `sha256:${crypto.createHash("sha256").update(raw).digest("hex")}`;
+}
+
 // Taux de conversion utilisé pour déduire les sats quand le frontend n'envoie
 // que le montant XOF (dashboard marchand). Configurable via XOF_PER_BTC.
 const XOF_PER_BTC = Number(process.env.XOF_PER_BTC) || 60000000;
@@ -69,14 +88,17 @@ function xofToSat(xof) {
 
 // Normalise une entrée du registre vers la forme attendue par le frontend
 // (MerchantDashboard.fromApi + CheckoutPage : id, amount FCFA, bolt11…).
-function normalizeInvoice(entry) {
+//   `publicView: true` (routes publiques checkout) : masque les données
+//   personnelles du marchand (numéro Mobile Money) — seuls le nom de boutique
+//   et les champs nécessaires au paiement sont exposés.
+function normalizeInvoice(entry, { publicView = false } = {}) {
   if (!entry) return null;
   const providerKey = String(entry.provider || "").toLowerCase();
   return {
     id: entry.reference,
     reference: entry.reference,
     merchant: entry.merchant || "Marchand Teranga",
-    merchantPhone: entry.merchantPhone || "",
+    merchantPhone: publicView ? "" : entry.merchantPhone || "",
     provider: entry.provider || null,
     liquidation: PROVIDER_LABELS[providerKey] || entry.provider || "Wave",
     amount: entry.amountXOF || null,
@@ -134,55 +156,6 @@ function normalizeTransaction(tx) {
   };
 }
 
-// [DEMO] : reconstruit une activité BTC crédible à partir des factures du
-// marchand — un dépôt à la confirmation du paiement Lightning, un paiement à
-// la liquidation Mobile Money. Aucun appel Bitnob (DEMO_MODE=true).
-function demoSandboxTransactions(sessionPhone) {
-  const target = sessionPhone.length > 9 ? sessionPhone.slice(-9) : sessionPhone;
-  const mine = [...invoicesStore.values()].filter((entry) => {
-    if (!target) return true;
-    return String(entry.merchantPhone || "")
-      .replace(/\D/g, "")
-      .endsWith(target);
-  });
-
-  const txs = [];
-  for (const entry of mine) {
-    if ((entry.status || "pending") !== "paid") continue;
-    const sats = Number(entry.amountSat || xofToSat(entry.amountXOF || 0));
-    const date = entry.paidAt || entry.createdAt;
-    const lbl = PROVIDER_LABELS[String(entry.provider || "").toLowerCase()] || "Mobile Money";
-    txs.push({
-      id: `${entry.reference}-in`,
-      date,
-      description: entry.description || "Encaissement Lightning",
-      typeLabel: "Dépôt",
-      direction: "credit",
-      amountSat: sats,
-      amountBtc: sats / 1e8,
-      state: "SETTLED",
-      currency: "BTC",
-      reference: entry.reference,
-      txHash: entry.paymentHash || entry.reference,
-    });
-    txs.push({
-      id: `${entry.reference}-out`,
-      date,
-      description: `Paiement ${lbl}`,
-      typeLabel: "Paiement",
-      direction: "debit",
-      amountSat: sats,
-      amountBtc: sats / 1e8,
-      state: "SETTLED",
-      currency: "BTC",
-      reference: entry.reference,
-      txHash: entry.payoutId || entry.reference,
-    });
-  }
-  txs.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
-  return txs;
-}
-
 // Recherche une facture par reference, id interne, invoiceId Bitnob ou
 // payment_hash (le checkout reçoit l'id du lien de paiement).
 function findInvoice(idOrRef) {
@@ -199,6 +172,19 @@ function findInvoice(idOrRef) {
     }
   }
   return null;
+}
+
+// Vérifie qu'une facture appartient bien au numéro de la session (comparaison
+// sur les 9 derniers chiffres — formats +221…/0…/avec espaces). Toute route
+// marchand agissant sur une facture existante DOIT passer par ce test :
+// l'identité vient toujours de la session, jamais de l'URL ou du body.
+function invoiceBelongsToSession(entry, sessionPhone) {
+  const target = String(sessionPhone || "").replace(/\D/g, "");
+  if (!target || !entry) return false;
+  const normalized = target.length > 9 ? target.slice(-9) : target;
+  return String(entry.merchantPhone || "")
+    .replace(/\D/g, "")
+    .endsWith(normalized);
 }
 
 // ==================================================================
@@ -259,6 +245,7 @@ async function liquidateMerchantPayout(event) {
   }
 
   entry.payoutStatus = "processing";
+  invoicesStore.set(entry.reference, entry); // persisté AVANT l'appel API (anti-double-payout après redémarrage)
   const phone = toInternationalPhone(entry.merchantPhone);
 
   try {
@@ -389,7 +376,9 @@ function handlePayoutEvent(event) {
 }
 
 // GET /api/whoami — valide les identifiants Bitnob (sandbox/prod).
-app.get("/api/whoami", async (req, res) => {
+// [SÉCURITÉ] : route de diagnostic réservée aux marchands connectés — elle
+// expose les infos du compte Bitnob et ne doit pas être publique en production.
+app.get("/api/whoami", requireMerchant, async (req, res) => {
   try {
     const data = await bitnob.whoami();
     console.log("[teranga-pay] Bitnob whoami OK :", data);
@@ -408,25 +397,15 @@ app.get("/api/whoami", async (req, res) => {
 // Proxy signé vers GET /api/transactions de Bitnob (currency=BTC), normalisé pour
 // le volet « Activité récente BTC ». Requiert Authorization: Bearer <token>.
 //   Query optionnel : limit (défaut 25, max 100).
-// En DEMO_MODE : l'activité est reconstruite à partir des factures du marchand.
+// Toujours les vraies APIs : aucune donnée simulée (pas de mode démo).
 app.get("/api/wallet/transactions", requireMerchant, async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 25, 100);
-  const sessionPhone = String(req.session.phone || "").replace(/\D/g, "");
-
-  if (process.env.DEMO_MODE === "true") {
-    return res.json({
-      success: true,
-      demo: true,
-      transactions: demoSandboxTransactions(sessionPhone),
-    });
-  }
 
   try {
     const data = await bitnob.listTransactions({ limit, currency: "BTC" });
     const raw = data?.data?.transactions || [];
     res.json({
       success: true,
-      demo: false,
       nextCursor: data?.data?.next_cursor || "",
       transactions: raw.map(normalizeTransaction).filter(Boolean),
     });
@@ -568,21 +547,14 @@ app.post("/api/invoices", requireMerchant, async (req, res) => {
 // (plus récentes en premier). Requiert le header Authorization: Bearer <token>.
 //   Query optionnels : merchant (nom), status (pending | paid).
 app.get("/api/invoices", requireMerchant, (req, res) => {
-  const sessionPhone = String(req.session.phone || "").replace(/\D/g, "");
   const merchant = String(req.query.merchant || "").trim().toLowerCase();
   const status = String(req.query.status || "").trim().toLowerCase();
 
-  let list = [...invoicesStore.values()];
-
   // [SÉCURITÉ] : un marchand ne voit que ses propres factures. Le filtre est
   // dérivé de la session (jamais du body/query) pour empêcher l'usurpation.
-  if (sessionPhone) {
-    const target = sessionPhone.length > 9 ? sessionPhone.slice(-9) : sessionPhone;
-    list = list.filter((e) => {
-      const digits = String(e.merchantPhone || "").replace(/\D/g, "");
-      return digits.endsWith(target);
-    });
-  }
+  let list = [...invoicesStore.values()].filter((e) =>
+    invoiceBelongsToSession(e, req.session.phone)
+  );
 
   if (merchant) {
     list = list.filter((e) => String(e.merchant || "").toLowerCase().includes(merchant));
@@ -602,6 +574,8 @@ app.get("/api/invoices", requireMerchant, (req, res) => {
 
 // GET /api/invoices/:id — détail d'un lien de paiement (guichet checkout).
 //   `id` accepté : reference, id interne, invoiceId Bitnob ou payment_hash.
+//   Route publique (le client diaspora n'a pas de compte) : le numéro Mobile
+//   Money du marchand est masqué (publicView).
 app.get("/api/invoices/:id", (req, res) => {
   const entry = findInvoice(req.params.id);
   if (!entry) {
@@ -609,7 +583,7 @@ app.get("/api/invoices/:id", (req, res) => {
       .status(404)
       .json({ success: false, error: `Facture "${req.params.id}" introuvable.` });
   }
-  res.json(normalizeInvoice(entry));
+  res.json(normalizeInvoice(entry, { publicView: true }));
 });
 
 // GET /api/invoices/:id/status — polling du statut (checkout client).
@@ -644,18 +618,26 @@ app.get("/api/invoices/:id/status", async (req, res) => {
     }
   }
 
-  res.json({ success: true, ...normalizeInvoice(entry) });
+  res.json({ success: true, ...normalizeInvoice(entry, { publicView: true }) });
 });
 
 // POST /api/invoices/:id/simulate-card — encaissement simulé (sans carte réelle).
 //   Appelle l'endpoint sandbox Bitnob POST /api/lightning/invoices/:id/simulate-payment,
-//   qui déclenche un vrai webhook btc.lightning.received.success -> liquidation FCFA réelle.
-app.post("/api/invoices/:id/simulate-card", async (req, res) => {
+//   qui déclenche un vrai webhook deposit.success -> liquidation FCFA réelle.
+//   [SÉCURITÉ] : réservé au marchand propriétaire de la facture (Bearer) — sans
+//   quoi n'importe qui pourrait déclencher des paiements simulés et des payouts.
+app.post("/api/invoices/:id/simulate-card", requireMerchant, async (req, res) => {
   const entry = findInvoice(req.params.id);
   if (!entry) {
     return res
       .status(404)
       .json({ success: false, error: `Facture "${req.params.id}" introuvable.` });
+  }
+  if (!invoiceBelongsToSession(entry, req.session.phone)) {
+    return res.status(403).json({
+      success: false,
+      error: "Cette facture n'appartient pas au compte connecté.",
+    });
   }
   if (entry.status === "paid") {
     return res.status(409).json({ success: false, error: "Cette facture est déjà payée." });
@@ -673,7 +655,7 @@ app.post("/api/invoices/:id/simulate-card", async (req, res) => {
     return res.json({
       success: true,
       simulated: true,
-      message: "Paiement simulé côté Bitnob — webhook btc.lightning.received.success en attente.",
+      message: "Paiement simulé côté Bitnob — webhook deposit.success en attente.",
       invoiceId: entry.invoiceId,
       ...(result?.data || {}),
     });
@@ -689,7 +671,9 @@ app.post("/api/invoices/:id/simulate-card", async (req, res) => {
 
 // POST /api/webhooks/bitnob — réception des notifications Bitnob.
 //   Sécurité : en-tête x-bitnob-signature (HMAC-SHA512 du body brut, secret webhook).
-//   Événement de paiement Lightning reçu : "btc.lightning.received.success".
+//   Événement de paiement Lightning (sandbox actuel) : "deposit.success" — le
+//   détail est imbriqué sous `data` (chain="lightning", reference, amount…).
+//   Alias historique (doc) : "btc.lightning.received.success" — champs à la racine.
 //   [ÉTAPE 5] : à la confirmation du paiement, déclenche automatiquement la
 //   liquidation FCFA vers le Mobile Money du marchand (payouts Bitnob).
 //   On répond 200 AVANT le payout pour éviter tout renvoi de Bitnob pendant
@@ -702,7 +686,7 @@ app.post("/api/webhooks/bitnob", (req, res) => {
   // [DEBUG] WEBHOOK_DEBUG=true : journalise quel secret × algorithme matche la signature reçue.
   if (process.env.WEBHOOK_DEBUG === "true") {
     try {
-      require("./services/webhookDebug").report(rawBody, signature);
+      require("./services/webhookDebug").report(rawBody, signature, req.headers);
     } catch {
       /* best effort */
     }
@@ -721,27 +705,60 @@ app.post("/api/webhooks/bitnob", (req, res) => {
 
   const event = req.body || {};
   const eventType = event.event || event.type || "unknown";
+  // Le sandbox Bitnob imbrique le détail sous `data` ; l'alias historique
+  // envoyait les champs à la racine du JSON. On lit toujours `payload`.
+  const payload = event.data && typeof event.data === "object" ? event.data : event;
+
+  // [DÉDUP] : un même événement ne doit jamais être traité deux fois (Bitnob
+  // peut réémettre le même webhook — retry réseau, double livraison). Clé :
+  // en-tête x-bitnob-event-id, event_id du corps, sinon SHA-256 du corps brut.
+  const eventKey = webhookEventKey(req);
+  const isDuplicate = webhookEventsStore.has(eventKey);
+  if (isDuplicate) {
+    console.log(
+      `[teranga-pay] Webhook "${eventType}" déjà traité (event_id=${eventKey}) — doublon ignoré.`
+    );
+  } else {
+    webhookEventsStore.set(eventKey, {
+      eventId: eventKey,
+      event: eventType,
+      receivedAt: new Date().toISOString(),
+      expiresAt: Date.now() + WEBHOOK_EVENT_TTL_MS,
+    });
+  }
 
   // Toujours répondre 200 OK pour éviter les renvois de Bitnob.
-  res.status(200).json({ success: true, received: true });
+  res.status(200).json({ success: true, received: true, duplicate: isDuplicate });
+  if (isDuplicate) return;
 
-  if (eventType === "btc.lightning.received.success") {
+  // Paiement Lightning : format sandbox imbriqué (deposit.success, chain=lightning)
+  // ou alias historique à plat. Un dépôt on-chain (chain="bitcoin") est ignoré.
+  const isLightningDeposit =
+    eventType === "btc.lightning.received.success" ||
+    (eventType === "deposit.success" && (!payload.chain || payload.chain === "lightning"));
+
+  if (isLightningDeposit) {
     console.log("======================================================");
     console.log("[teranga-pay] PAIEMENT LIGHTNING CONFIRMÉ ✅");
     console.log(`  event        : ${eventType}`);
-    console.log(`  reference    : ${event.reference}`);
-    console.log(`  amount (sat) : ${event.amount ?? event.amount_sat}`);
-    console.log(`  payment_hash : ${event.payment_hash}`);
-    console.log(`  transaction  : ${event.transaction_id}`);
-    console.log(`  timestamp    : ${event.timestamp}`);
+    console.log(`  reference    : ${payload.reference}`);
+    console.log(`  amount (sat) : ${payload.amount ?? payload.amount_sat}`);
+    console.log(`  payment_hash : ${payload.payment_hash}`);
+    console.log(`  transaction  : ${payload.transaction_id}`);
+    console.log(`  timestamp    : ${payload.timestamp}`);
     console.log("======================================================");
 
     // [ÉTAPE 5] Liquidation FCFA en tâche de fond (le 200 est déjà parti).
     // markInvoicePaid est idempotent : webhook + polling ne liquident qu'une fois.
-    const entry = findInvoice(event.reference || event.payment_hash);
+    const entry = findInvoice(payload.reference || payload.payment_hash);
     markInvoicePaid(entry, "webhook-bitnob");
+  } else if (eventType === "deposit.success") {
+    // Dépôt on-chain : aucune facture Lightning associée — rien à liquider.
+    console.log(
+      `[teranga-pay] Webhook deposit.success hors Lightning (chain="${payload.chain}") — ignoré.`
+    );
   } else if (eventType.startsWith("payouts.")) {
-    // [ÉTAPE 5] Cycle de vie du payout (withdrawal.success / withdrawal.expired).
+    // [ÉTAPE 5] Cycle de vie du payout (initialized / processing / success / failed).
     handlePayoutEvent(event);
   } else {
     console.log(`[teranga-pay] Webhook Bitnob reçu (event="${eventType}")`);
@@ -845,16 +862,25 @@ app.put("/api/merchants/me", requireMerchant, (req, res) => {
   res.json({ success: true, merchant: updated });
 });
 
+// Route inconnue -> 404 JSON (le frontend interprète toujours du JSON).
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: `Route introuvable : ${req.method} ${req.path}`,
+  });
+});
+
 const PORT = process.env.PORT || 5000;
 
 // [ÉTAPE 6] Exécution directe => on écoute. Import (tests) => on exporte l'app sans écouter.
 if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`[teranga-pay] Serveur backend démarré sur http://localhost:${PORT}`);
-    // Nettoyage périodique des OTP / sessions expirés (toutes les 5 min).
+    // Nettoyage périodique des OTP / sessions / événements webhook expirés (5 min).
     setInterval(() => {
       try {
         auth.pruneExpired();
+        webhookEventsStore.pruneExpired();
       } catch {
         /* best effort */
       }

@@ -32,8 +32,7 @@ git push origin main
 | backend | `FRONTEND_URL` | URL du frontend, ex. `https://teranga-pay-frontend.onrender.com` |
 | backend | `PUBLIC_URL` | URL du backend, ex. `https://teranga-pay-backend.onrender.com` |
 | backend | `PAYOUT_CALLBACK_URL` | `https://teranga-pay-backend.onrender.com/api/webhooks/bitnob` |
-| backend | `BITNOB_CLIENT_ID` / `BITNOB_CLIENT_SECRET` / `BITNOB_WEBHOOK_SECRET` | clés sandbox Bitnob (ou **laisser vide** pour le mode démo) |
-| backend | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | optionnel (carte bancaire) |
+| backend | `BITNOB_CLIENT_ID` / `BITNOB_CLIENT_SECRET` / `BITNOB_WEBHOOK_SECRET` | clés sandbox Bitnob (**requises** : aucun mode démo) |
 | frontend | `VITE_API_URL` | `https://teranga-pay-backend.onrender.com/api` |
 
 5. **Apply** → Render build et déploie les deux services.
@@ -43,16 +42,16 @@ git push origin main
 
 ---
 
-## 3. Mode démo (par défaut, sans clés)
+## 3. Aucun mode démo — clés Bitnob requises
 
-`render.yaml` fixe `DEMO_MODE=true` : paiements et liquidations sont **simulés**, aucune clé
-Bitnob/Stripe n'est nécessaire. Idéal pour une démo publique.
+Il n'existe **plus aucun mode démo** (ni surcharge d'environnement, ni simulations) :
+toutes les routes passent par les vraies APIs Bitnob. Sans clés valides, la création de
+facture et la liquidation échouent (c'est volontaire — le sandbox Bitnob sert de bac à sable,
+voir [`VALIDATION-SANDBOX-BITNOB.md`](VALIDATION-SANDBOX-BITNOB.md)).
 
-> ⚠️ Garde-fou : le backend **refuse de démarrer** si `NODE_ENV=production` **et**
-> `DEMO_MODE=true`. Render positionne `NODE_ENV` automatiquement en production pour les Web
-> Services — il faut donc mettre `DEMO_MODE=false` **et** renseigner les clés Bitnob pour un
-> déploiement de bout en bout. Sinon, exécuter en service « démo » en surchargeant
-> `NODE_ENV=development`.
+> Si le compte Bitnob impose une **IP whitelist** (erreur `403 IP address not whitelisted`),
+> voir la section « IP whitelisting Bitnob » plus bas — ou désactiver la restriction côté
+> dashboard Bitnob en sandbox.
 
 ---
 
@@ -61,7 +60,8 @@ Bitnob/Stripe n'est nécessaire. Idéal pour une démo publique.
 Une fois le backend en ligne, pointer les webhooks du dashboard Bitnob vers :
 
 - Paiement Lightning : `https://teranga-pay-backend.onrender.com/api/webhooks/bitnob`
-- Payouts : même URL (événements `payouts.withdrawal.*`).
+  (événement `deposit.success`).
+- Payouts : même URL (événements `payouts.*`).
 
 Voir la procédure complète dans [`VALIDATION-SANDBOX-BITNOB.md`](VALIDATION-SANDBOX-BITNOB.md).
 
@@ -76,6 +76,27 @@ Pour une démo c'est acceptable ; pour persister, ajouter un **Render Disk** mon
 
 ---
 
+## 6. IP whitelisting Bitnob (erreur `403` au whoami/facture)
+
+Les Web Services Render (plan free) n'ont pas d'IP **sortante** fixe. Si le compte Bitnob a
+activé la whitelist IP, les appels API échouent en `403 IP address not whitelisted` :
+
+1. **Solution recommandée (sandbox)** : désactiver la whitelist dans le dashboard Bitnob
+   (**API Settings → IP Whitelisting**) — acceptable en sandbox, pas en production.
+2. **Relais local** (production sans IP fixe côté hébergeur) : [`backend/scripts/bitnob-relay.js`](backend/scripts/bitnob-relay.js)
+   expose un proxy qui n'accepte QUE les requêtes portant un chemin secret `RELAY_SECRET`
+   (obligatoire, jamais committé) et ne relaie que vers `https://api.bitnob.com` :
+   ```powershell
+   $env:RELAY_SECRET = "<chaîne aléatoire de 32+ caractères>"
+   node scripts/bitnob-relay.js      # écoute sur 127.0.0.1:8791
+   ngrok http 8791                   # tunnel public
+   # Sur Render : BITNOB_BASE_URL = https://<id>.ngrok.app/<RELAY_SECRET>
+   ```
+   Contrainte : la machine locale (IP whitelistée) doit rester allumée — à réserver au
+   dépannage, pas à un service permanent.
+
+---
+
 ## Options d'hébergement (combinaisons possibles)
 
 | Backend | Frontend | Fichiers fournis |
@@ -85,7 +106,7 @@ Pour une démo c'est acceptable ; pour persister, ajouter un **Render Disk** mon
 | **Railway** | **Railway** (Static) | [`backend/railway.json`](backend/railway.json) |
 
 Peu importe la combinaison, le principe reste le même :
-- **backend** : `npm install` puis `npm start`, sonde `/health`, variables Bitnob (ou démo) ;
+- **backend** : `npm install` puis `npm start`, sonde `/health`, clés Bitnob (aucun mode démo) ;
 - **frontend** : `npm install && npm run build`, publier `dist/`, et `VITE_API_URL = <URL-backend>/api`.
 
 ---
@@ -96,8 +117,8 @@ Peu importe la combinaison, le principe reste le même :
 2. Service → **Settings → Root Directory** : `backend`.
 3. Railway détecte Node via [`backend/railway.json`](backend/railway.json) (build `npm install`,
    start `npm start`, healthcheck `/health`).
-4. **Variables** : ajouter `DEMO_MODE=true` (démo) puis les clés Bitnob/Stripe si besoin,
-   ainsi que `FRONTEND_URL`, `PUBLIC_URL`, `PAYOUT_CALLBACK_URL`.
+4. **Variables** : les clés Bitnob (`BITNOB_CLIENT_ID`, `BITNOB_CLIENT_SECRET`,
+   `BITNOB_WEBHOOK_SECRET`) ainsi que `FRONTEND_URL`, `PUBLIC_URL`, `PAYOUT_CALLBACK_URL`.
 5. **Settings → Networking → Generate Domain** → noter l'URL publique
    (`https://<service>.up.railway.app`).
 

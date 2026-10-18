@@ -125,11 +125,15 @@ teranga-pay/
 │   ├── package.json
 │   ├── server.js                 # serveur Express : toutes les routes (réalisé)
 │   ├── data/                     # registres JSON persistants (gitignoré)
+│   ├── scripts/
+│   │   ├── bitnob-relay.js       # relais local (contournement IP whitelisting) — voir DEPLOY.md
+│   │   └── check-webhook-signature.js # diagnostic signature webhook (CLI)
 │   ├── services/
 │   │   ├── bitnobService.js      # API Bitnob : auth HMAC, invoices, payouts (réalisé)
 │   │   ├── store.js              # persistance JSON fichier (réalisé)
 │   │   ├── auth.js               # auth passwordless : OTP + sessions (réalisé)
-│   │   └── sms.js                # envoi OTP SMS/WhatsApp (Twilio / Cloud API) (réalisé)
+│   │   ├── sms.js                # envoi OTP SMS/WhatsApp (Twilio / Cloud API) (réalisé)
+│   │   └── webhookDebug.js       # diagnostic signature webhook (secret × algorithme)
 │   └── test/
 │       ├── server.test.js        # tests e2e hors-ligne (npm test)
 │       └── bitnobStub.js         # stub HTTP de l'API Bitnob pour les tests
@@ -153,7 +157,6 @@ teranga-pay/
             ├── MerchantAuth.jsx       # connexion passwordless (réalisée)
             ├── CheckoutPage.jsx       # page de paiement client (réalisée)
             ├── ReceiptModal.jsx       # modale de reçu (réalisée)
-            ├── Navbar.jsx             # (stub inutilisé — le dashboard a son propre en-tête)
             └── services/api.js        # couche API centralisée axios (réalisée)
 ```
 
@@ -207,14 +210,14 @@ principaux appellent `onEnterDashboard` pour basculer vers `MerchantDashboard`.
 | Méthode | Route | Rôle |
 |---|---|---|
 | GET | `/health` | sonde de santé |
-| GET | `/api/whoami` | valide les identifiants Bitnob |
-| GET | `/api/wallet/transactions` | activité récente du portefeuille BTC (`Bearer`) — proxy de `GET /api/transactions` Bitnob (`currency=BTC`) ; en `DEMO_MODE`, reconstruite depuis les factures |
+| GET | `/api/whoami` | valide les identifiants Bitnob — **protégé `Bearer`** (diagnostic marchand) |
+| GET | `/api/wallet/transactions` | activité récente du portefeuille BTC (`Bearer`) — proxy de `GET /api/transactions` Bitnob (`currency=BTC`) |
 | POST | `/api/invoices` | crée client + facture Lightning (BOLT11 + QR) — **protégé `Bearer`** (marchand = session) |
 | GET | `/api/invoices` | liste des factures **du marchand connecté** (`Bearer`), filtres `merchant` / `status` |
-| GET | `/api/invoices/:id` | détail d'un lien de paiement |
-| GET | `/api/invoices/:id/status` | polling du statut (confirmé via Bitnob) |
-| POST | `/api/invoices/:id/simulate-card` | encaissement simulé côté Bitnob sandbox (valide la chaîne webhook → payout) |
-| POST | `/api/webhooks/bitnob` | webhook signé : `btc.lightning.received.success` → liquidation FCFA ; `payouts.withdrawal.success` / `.expired` → statut du payout |
+| GET | `/api/invoices/:id` | détail d'un lien de paiement (public, numéro marchand masqué) |
+| GET | `/api/invoices/:id/status` | polling du statut (confirmé via Bitnob ; public, numéro marchand masqué) |
+| POST | `/api/invoices/:id/simulate-card` | encaissement simulé côté Bitnob sandbox (valide la chaîne webhook → payout) — **protégé `Bearer`**, réservé au marchand propriétaire |
+| POST | `/api/webhooks/bitnob` | webhook signé : `deposit.success` (Lightning, détail sous `data`) → liquidation FCFA ; `payouts.*` → statut du payout. Dédupliqué sur `event_id` (en-tête ou corps, registre persistant, TTL 7 j) |
 | GET | `/api/webhooks/bitnob` | sonde du tunnel ngrok |
 | POST | `/api/auth/register` | crée un compte marchand (email + mot de passe) → jeton de session |
 | POST | `/api/auth/login` | connexion email + mot de passe → jeton de session |
@@ -300,9 +303,12 @@ Validé contre la doc officielle (docs.bitnob.com) :
   (`bitnobService.js`).
 - ✅ **Endpoints** : `/api/whoami`, `/api/customers`, `/api/lightning/invoices[/:id]`,
   `/api/payouts/quotes` → `/:quoteId/initialize` → `/:quoteId/finalize`, `/api/payouts/banks/:countryCode`.
-- ✅ **Webhook Lightning** : événement `btc.lightning.received.success` ; signature = **HMAC-SHA512**
-  du corps, en-tête `x-bitnob-signature`. Payouts : `payouts.withdrawal.success` / `.expired`
-  (plus `payouts.initialized` / `payouts.processing`, non terminaux, à ignorer).
+- ✅ **Webhook Lightning** : événement `deposit.success` (détail imbriqué sous `data`,
+  `chain="lightning"` ; alias historique `btc.lightning.received.success` supporté) ;
+  signature = **HMAC-SHA512** du corps, en-tête `x-bitnob-signature`.
+  Payouts : `payouts.initialized` / `payouts.processing` (non terminaux) puis succès/échec
+  (`statut SUCCESS`/`COMPLETED` ou `FAILED`/`EXPIRED`). `BITNOB_WEBHOOK_SECRET` accepte
+  plusieurs secrets séparés par des virgules (dashboard avec plusieurs webhooks).
 
 Validé contre le sandbox Bitnob (2026-10-17) :
 
@@ -315,13 +321,35 @@ Validé contre le sandbox Bitnob (2026-10-17) :
 - ✅ **Chaîne payout réelle** : quote → initialize → finalize acceptés (statut `PENDING`,
   `sandbox_txn_…`) ; `simulate-payment` accepté → facture passée `paid`.
 
-Reste à confirmer :
+Validé de bout en bout via ngrok (2026-10-18) :
 
-- **Flux complet avec webhook** : `POST /api/lightning/invoices/:id/simulate-payment` déclenche un
-  vrai webhook `btc.lightning.received.success` — à rejouer avec ngrok + serveur local
-  (voir la checklist).
-- **Déduplication webhook** : la doc recommande de dédupliquer sur `event_id` (payload + header
-  `x-bitnob-event-id`) ; aujourd'hui l'idempotence est assurée par les gardes de statut.
+- ✅ **Flux complet réel** : `simulate-payment` → détection du paiement → liquidation
+  (`quote → initialize → finalize`) → webhooks `payouts.*` **signés et traités** →
+  `payoutStatus = "completed"` (une facture test est allée jusqu'au bout).
+- ✅ **Signature webhook** : `BITNOB_WEBHOOK_SECRET` × HMAC-SHA512 (confirmé sur les
+  événements `payouts.*`). Si le webhook n'arrive pas encore, le paiement est confirmé par
+  **polling** (`source=polling-bitnob`) et la liquidation se déclenche quand même.
+- ✅ **Déduplication webhook** — registre persistant `webhook_events` : clé
+  `x-bitnob-event-id`, repli `event_id` du corps puis SHA-256 du corps brut ; TTL 7 jours,
+  purgé périodiquement. Un doublon n'est jamais retraité (réponse `duplicate: true`),
+  en plus des gardes de statut.
+
+À finaliser côté dashboard Bitnob :
+
+- ⚠️ **Webhook en double** : un ancien webhook (secret différent) livre encore les
+  `deposit.*` et se fait rejeter en 401. Supprimer l'ancien, ou empiler son secret dans
+  `BITNOB_WEBHOOK_SECRET` (séparés par une virgule) — le code accepte plusieurs secrets.
+- ⚠️ **Solde sandbox** : recharger le compte de démonstration avant des payouts successifs
+  (`INSUFFICIENT_FUNDS` après épuisement).
+
+Durcissements réalisés :
+
+- `GET /api/whoami` et `POST /api/invoices/:id/simulate-card` exigent un **jeton marchand**
+  (`simulate-card` vérifie en plus que la facture appartient au compte — 403 sinon).
+- Routes publiques du guichet : le **numéro Mobile Money du marchand est masqué**
+  (seuls le nom de boutique et les champs nécessaires au paiement sont exposés).
+- 404 JSON uniforme pour toute route inconnue ; `payoutStatus = "processing"` persisté
+  avant l'appel API (anti double-liquidation après redémarrage).
 
 > Procédure de validation pas à pas (whoami → facture réelle → webhook → payout, avec les
 > correctifs à appliquer selon les réponses du sandbox) : **[`VALIDATION-SANDBOX-BITNOB.md`](VALIDATION-SANDBOX-BITNOB.md)**.

@@ -231,11 +231,15 @@ test("Factures : 401 sans jeton, création/liste scopées au compte connecté", 
 });
 
 // ------------------------------------------------- activité BTC du portefeuille
-test("GET /api/wallet/transactions : 401 sans jeton, activité scopée au marchand", async () => {
-  const phone = "770555667";
+test("GET /api/wallet/transactions : 401 sans jeton, transactions normalisées depuis Bitnob", async () => {
   const reg = await jsonFetch("/api/auth/register", {
     method: "POST",
-    body: { email: `btc+${Date.now()}@teranga.sn`, password: "motdepasse123", phone, shop: "Boutique BTC" },
+    body: {
+      email: `btc+${Date.now()}@teranga.sn`,
+      password: "motdepasse123",
+      phone: "770555667",
+      shop: "Boutique BTC",
+    },
   });
   const token = reg.data.session.token;
 
@@ -243,34 +247,23 @@ test("GET /api/wallet/transactions : 401 sans jeton, activité scopée au marcha
   const anon = await jsonFetch("/api/wallet/transactions");
   assert.equal(anon.status, 401);
 
-  // Facture payée du marchand (injectée dans le registre, DEMO_MODE reconstruit l'activité).
-  const reference = "btc-ref-" + Date.now();
-  store.collection("invoices").set(reference, {
-    reference,
-    description: "Vente test BTC",
-    amountSat: 2080,
-    amountXOF: 5000,
-    merchant: "Boutique BTC",
-    merchantPhone: phone,
-    provider: "wave",
-    status: "paid",
-    paidAt: new Date().toISOString(),
-    paymentHash: "ph_btc_test",
-    createdAt: new Date().toISOString(),
-  });
-
+  // Avec jeton : le proxy renvoie les transactions du stub Bitnob, normalisées.
   const res = await jsonFetch("/api/wallet/transactions", {
     headers: { Authorization: `Bearer ${token}` },
   });
   assert.equal(res.status, 200);
   assert.equal(res.data.success, true);
   assert.ok(Array.isArray(res.data.transactions));
-  // Un dépôt (crédit) et un paiement (débit) sont dérivés de la facture payée.
-  assert.ok(res.data.transactions.some((t) => t.reference === reference && t.direction === "credit"));
-  assert.ok(res.data.transactions.some((t) => t.reference === reference && t.direction === "debit"));
-  const credit = res.data.transactions.find((t) => t.reference === reference && t.direction === "credit");
-  assert.equal(credit.amountBtc, 2080 / 1e8);
+  assert.equal(res.data.transactions.length, 2);
+
+  const credit = res.data.transactions.find((t) => t.direction === "credit");
+  assert.equal(credit.reference, "btc-ref-stub");
+  assert.equal(credit.amountBtc, 2500 / 1e8);
   assert.equal(credit.typeLabel, "Dépôt");
+  assert.equal(credit.txHash, "hash_stub_deposit");
+
+  const debit = res.data.transactions.find((t) => t.direction === "debit");
+  assert.equal(debit.typeLabel, "Paiement");
 });
 
 // ---------------------------------------------------------------- webhook Bitnob
@@ -319,6 +312,244 @@ test("Webhook Bitnob signé marque la facture payée (liquidation via stub)", as
   const status = await waitForStatus(reference, (data) => data.payoutStatus === "done");
   assert.equal(status.status, "paid");
   assert.equal(status.payoutStatus, "done"); // payout soumis (statut PENDING côté Bitnob)
+});
+
+// ------------------------------------------------- dédup webhook (event_id)
+test("Dédup webhook : le même event_id n'est traité qu'une fois", async () => {
+  const reference = "dedup-ref-" + Date.now();
+  store.collection("invoices").set(reference, {
+    invoiceId: "inv_dedup_1",
+    reference,
+    description: "Test dédup",
+    amountSat: 1000,
+    amountXOF: 5000,
+    merchant: "Boutique Test",
+    merchantPhone: "771234567",
+    provider: "wave",
+    status: "pending",
+    payoutStatus: null,
+    createdAt: new Date().toISOString(),
+  });
+
+  const payload = JSON.stringify({
+    event: "btc.lightning.received.success",
+    reference,
+    amount: 1000,
+    payment_hash: "ph_dedup",
+  });
+  const eventId = `evt-dedup-${Date.now()}`;
+  const send = () =>
+    fetch(base + "/api/webhooks/bitnob", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-bitnob-signature": signBitnob(payload),
+        "x-bitnob-event-id": eventId,
+      },
+      body: payload,
+    });
+
+  // 1er envoi : traité (duplicate=false).
+  const first = await send();
+  assert.equal(first.status, 200);
+  const firstBody = await first.json();
+  assert.equal(firstBody.duplicate, false);
+
+  // 2e envoi identique (même event_id) : doublon ignoré (duplicate=true).
+  const second = await send();
+  assert.equal(second.status, 200);
+  const secondBody = await second.json();
+  assert.equal(secondBody.duplicate, true);
+
+  // Le registre garde la trace de l'événement (purge par TTL plus tard).
+  assert.ok(store.collection("webhook_events").has(eventId));
+
+  // La facture est payée et liquidée une seule fois.
+  const status = await waitForStatus(reference, (data) => data.payoutStatus === "done");
+  assert.equal(status.status, "paid");
+  assert.equal(status.payoutStatus, "done");
+});
+
+// ---------------------------- webhook réel du sandbox : deposit.success (imbriqué)
+test("Webhook deposit.success (payload imbriqué) marque la facture payée", async () => {
+  const reference = "deposit-ref-" + Date.now();
+  store.collection("invoices").set(reference, {
+    invoiceId: "inv_deposit_1",
+    reference,
+    description: "Test deposit.success",
+    amountSat: 1667,
+    amountXOF: 1000,
+    merchant: "Boutique Test",
+    merchantPhone: "771234567",
+    provider: "wave",
+    status: "pending",
+    payoutStatus: null,
+    createdAt: new Date().toISOString(),
+  });
+
+  // Format exact observé en sandbox le 2026-10-18 : détail sous `data`, event_id
+  // dans le corps (pas d'en-tête x-bitnob-event-id).
+  const eventId = `evt-deposit-${Date.now()}`;
+  const payload = JSON.stringify({
+    data: {
+      amount: "1667",
+      chain: "lightning",
+      currency: "BTC",
+      fee: "0",
+      invoice: "lntb16670n1pstub",
+      reference,
+      timestamp: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+      transaction_id: "tx_deposit_stub",
+    },
+    event: "deposit.success",
+    event_id: eventId,
+  });
+
+  const res = await fetch(base + "/api/webhooks/bitnob", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-bitnob-signature": signBitnob(payload) },
+    body: payload,
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.duplicate, false);
+
+  // Dédup de repli : la clé vient du event_id du corps (pas d'en-tête).
+  assert.ok(store.collection("webhook_events").has(eventId));
+
+  const status = await waitForStatus(reference, (data) => data.payoutStatus === "done");
+  assert.equal(status.status, "paid");
+  assert.equal(status.payoutStatus, "done");
+});
+
+// ------------------------------- dépôt on-chain ignoré (chain != lightning)
+test("Webhook deposit.success on-chain (chain=bitcoin) ne paie pas la facture", async () => {
+  const reference = "onchain-ref-" + Date.now();
+  store.collection("invoices").set(reference, {
+    invoiceId: "inv_onchain_1",
+    reference,
+    description: "Test dépôt on-chain",
+    amountSat: 1667,
+    amountXOF: 1000,
+    merchant: "Boutique Test",
+    merchantPhone: "771234567",
+    provider: "wave",
+    status: "pending",
+    payoutStatus: null,
+    createdAt: new Date().toISOString(),
+  });
+
+  const payload = JSON.stringify({
+    data: { amount: "1667", chain: "bitcoin", reference, transaction_id: "tx_onchain_stub" },
+    event: "deposit.success",
+    event_id: `evt-onchain-${Date.now()}`,
+  });
+
+  const res = await fetch(base + "/api/webhooks/bitnob", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-bitnob-signature": signBitnob(payload) },
+    body: payload,
+  });
+  assert.equal(res.status, 200);
+
+  const { data } = await jsonFetch(`/api/invoices/${reference}/status`);
+  assert.equal(data.status, "pending");
+  assert.equal(data.payoutStatus, null);
+});
+
+// ------------------------------------------------- sécurité des routes marchand
+test("whoami et simulate-card exigent un jeton marchand propriétaire", async () => {
+  // whoami sans jeton -> 401 (diagnostic réservé aux marchands).
+  const anonWho = await jsonFetch("/api/whoami");
+  assert.equal(anonWho.status, 401);
+
+  const reg = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: {
+      email: `sim+${Date.now()}@teranga.sn`,
+      password: "motdepasse123",
+      phone: "770004400",
+      shop: "Boutique Simulation",
+    },
+  });
+  const token = reg.data.session.token;
+
+  // whoami avec jeton -> 200.
+  const who = await jsonFetch("/api/whoami", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(who.status, 200);
+  assert.equal(who.data.success, true);
+
+  // Facture du marchand connecté (stub Bitnob local).
+  const created = await jsonFetch("/api/invoices", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: { amountXOF: 2000, description: "Simulation protégée", provider: "wave" },
+  });
+  assert.equal(created.status, 201);
+  const reference = created.data.reference;
+
+  // simulate-card sans jeton -> 401.
+  const anonSim = await jsonFetch(`/api/invoices/${reference}/simulate-card`, { method: "POST" });
+  assert.equal(anonSim.status, 401);
+
+  // simulate-card avec le jeton d'un AUTRE marchand -> 403.
+  const other = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: {
+      email: `other-sim+${Date.now()}@teranga.sn`,
+      password: "motdepasse123",
+      phone: "770004499",
+    },
+  });
+  const intruderSim = await jsonFetch(`/api/invoices/${reference}/simulate-card`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${other.data.session.token}` },
+  });
+  assert.equal(intruderSim.status, 403);
+
+  // simulate-card par le propriétaire -> 200 (paiement simulé côté Bitnob).
+  const ownerSim = await jsonFetch(`/api/invoices/${reference}/simulate-card`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(ownerSim.status, 200);
+  assert.equal(ownerSim.data.simulated, true);
+});
+
+test("Routes publiques : le numéro Mobile Money du marchand est masqué", async () => {
+  const reg = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: {
+      email: `privacy+${Date.now()}@teranga.sn`,
+      password: "motdepasse123",
+      phone: "770007700",
+      shop: "Boutique Privacy",
+    },
+  });
+  const token = reg.data.session.token;
+
+  const created = await jsonFetch("/api/invoices", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: { amountXOF: 3000, description: "Facture privacy", provider: "wave" },
+  });
+  const reference = created.data.reference;
+  // La réponse marchand (authentifiée) contient bien le numéro.
+  assert.equal(created.data.merchantPhone, "+221770007700");
+
+  // Le guichet public ne l'expose pas.
+  const publics = [
+    await jsonFetch(`/api/invoices/${reference}`),
+    await jsonFetch(`/api/invoices/${reference}/status`),
+  ];
+  for (const { status, data } of publics) {
+    assert.equal(status, 200);
+    assert.equal(data.merchantPhone, "", "le numéro du marchand ne doit pas fuiter publiquement");
+    assert.equal(data.merchant, "Boutique Privacy");
+    assert.ok(data.reference === reference);
+  }
 });
 
 test("Persistance : la facture survit à une relecture du store", () => {
@@ -483,4 +714,22 @@ test("verifyWebhookSignature accepte WEBHOOK_SECRET×sha512 ET CLIENT_SECRET×sh
   assert.equal(bitnob.verifyWebhookSignature(body, b), true);
 
   assert.equal(bitnob.verifyWebhookSignature(body, "deadbeef"), false);
+
+  // Multi-secrets : BITNOB_WEBHOOK_SECRET accepte plusieurs secrets séparés par
+  // des virgules (dashboard Bitnob avec plusieurs webhooks, chacun son secret).
+  // Un secret peut légitimement commencer par un espace (accepté par le dashboard).
+  const prev = process.env.BITNOB_WEBHOOK_SECRET;
+  process.env.BITNOB_WEBHOOK_SECRET = "secret_ancien,  CleDemoFictive2027";
+  try {
+    const multi = crypto.createHmac("sha512", "secret_ancien").update(body, "utf8").digest("hex");
+    assert.equal(bitnob.verifyWebhookSignature(body, multi), true);
+
+    const spacy = crypto.createHmac("sha512", "  CleDemoFictive2027").update(body, "utf8").digest("hex");
+    assert.equal(bitnob.verifyWebhookSignature(body, spacy), true);
+
+    const tidy = crypto.createHmac("sha512", "CleDemoFictive2027").update(body, "utf8").digest("hex");
+    assert.equal(bitnob.verifyWebhookSignature(body, tidy), true);
+  } finally {
+    process.env.BITNOB_WEBHOOK_SECRET = prev;
+  }
 });

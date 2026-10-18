@@ -830,9 +830,10 @@ export default function MerchantDashboard({
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [provider, setProvider] = useState(PROVIDERS[0].id);
-  // Prérempli avec le numéro du compte connecté (le backend impose de toute
-  // façon le numéro de la session : une facture appartient toujours au compte).
-  const [phone, setPhone] = useState(() => phoneDigits(session?.phone || ""));
+  // Numéro de liquidation : celui du compte connecté. Le backend dérive TOUJOURS
+  // le marchand de la session (anti-usurpation) — ce champ est donc en lecture
+  // seule, on ne fait que l'afficher.
+  const payoutPhone = phoneDigits(session?.phone || "");
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState("");
@@ -892,7 +893,7 @@ export default function MerchantDashboard({
   // [BTC] Charge l'activité récente du portefeuille Bitcoin du marchand.
   useEffect(() => {
     const digits = phoneDigits(session?.phone || "");
-    if (!digits || !session?.token) return; // mode démo sans session : pas d'appel
+    if (!digits || !session?.token) return; // sans session : pas d'appel
     let cancelled = false;
     setTxLoading(true);
     setTxError("");
@@ -966,10 +967,11 @@ export default function MerchantDashboard({
     return invoices.filter((inv) => {
       const okStatus =
         filter === "all" || (filter === "paid" ? inv.status === "paid" : inv.status === "pending");
+      // Chaînes vides par défaut : une entrée du cache local peut être incomplète.
       const okQuery =
         !q ||
-        inv.description.toLowerCase().includes(q) ||
-        inv.reference.toLowerCase().includes(q);
+        String(inv.description || "").toLowerCase().includes(q) ||
+        String(inv.reference || "").toLowerCase().includes(q);
       return okStatus && okQuery;
     });
   }, [invoices, filter, query]);
@@ -990,8 +992,8 @@ export default function MerchantDashboard({
       setError("Ajoutez une description à la facture.");
       return;
     }
-    if (phoneDigits(phone).length !== 9) {
-      setError("Saisissez un numéro Mobile Money valide (9 chiffres).");
+    if (payoutPhone.length !== 9) {
+      setError("Votre compte n'a pas de numéro Mobile Money valide — reconnectez-vous.");
       return;
     }
 
@@ -1000,13 +1002,13 @@ export default function MerchantDashboard({
     setCreating(true);
 
     try {
+      // Le backend ignore tout marchand venant du body : il utilise la session
+      // (merchantPhone, merchant, shop). On n'envoie que les champs de la facture.
       const remote = await createPaymentLink(
         {
-          merchantPhone: phoneDigits(phone),
           provider: providerObj.id,
           amountXOF: value,
           description: description.trim(),
-          merchant: shop,
         },
         session?.token
       );
@@ -1014,7 +1016,6 @@ export default function MerchantDashboard({
       setInvoices((prev) => [invoice, ...prev]);
       setAmount("");
       setDescription("");
-      setPhone("");
       setModalInvoice(invoice);
       if (invoice.status && invoice.reference) showToast(`Facture ${invoice.reference} créée.`);
     } catch (err) {
@@ -1343,7 +1344,7 @@ export default function MerchantDashboard({
                   <label className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
                     Numéro Mobile Money
                   </label>
-                  <div className="mt-1.5 flex items-center rounded-xl border border-line/10 bg-base/40 focus-within:border-emerald-400/50">
+                  <div className="mt-1.5 flex items-center rounded-xl border border-line/10 bg-base/40">
                     <span className="flex items-center gap-1.5 border-r border-line/10 px-3 py-2.5 text-sm text-ink-subtle">
                       <img
                         src={PROVIDERS.find((p) => p.id === provider)?.logo}
@@ -1352,17 +1353,13 @@ export default function MerchantDashboard({
                       />
                       +221
                     </span>
-                    <input
-                      type="tel"
-                      inputMode="numeric"
-                      value={phone}
-                      onChange={(e) => setPhone(formatPhoneInput(e.target.value))}
-                      placeholder="77 123 45 67"
-                      className="w-full bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-ink-faint"
-                    />
+                    <span className="w-full px-3 py-2.5 font-mono text-sm text-ink">
+                      {formatPhoneInput(payoutPhone) || "—"}
+                    </span>
                   </div>
                   <p className="mt-1.5 text-[11px] text-ink-faint">
-                    Numéro de réception {PROVIDERS.find((p) => p.id === provider)?.name}.
+                    Numéro de votre compte — les fonds y sont liquidés automatiquement
+                    ({PROVIDERS.find((p) => p.id === provider)?.name}).
                   </p>
                 </div>
 

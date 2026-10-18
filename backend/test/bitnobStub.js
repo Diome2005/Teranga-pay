@@ -31,6 +31,11 @@ function start() {
       res.end(JSON.stringify(payload));
     };
 
+    // GET /api/whoami — infos du client Bitnob (diagnostic des clés).
+    if (method === "GET" && url === "/api/whoami") {
+      return json(200, { data: { id: "stub_client", environment: "sandbox" } });
+    }
+
     // POST /api/customers — création de profil client.
     if (method === "POST" && url === "/api/customers") {
       return json(200, { data: { id: nextId("cust"), customer_type: "individual" } });
@@ -60,6 +65,39 @@ function start() {
     // GET /api/lightning/invoices/:id — statut d'une facture.
     if (method === "GET" && /^\/api\/lightning\/invoices\/[^/]+$/.test(url)) {
       return json(200, { data: { id: url.split("/").pop(), status: "pending" } });
+    }
+
+    // GET /api/transactions — historique des transactions du compte (activité BTC).
+    if (method === "GET" && url === "/api/transactions") {
+      return json(200, {
+        data: {
+          transactions: [
+            {
+              transaction_id: "tx_stub_deposit",
+              type: "DEPOSIT_CONFIRMED",
+              side: "credit",
+              amount: 2500,
+              currency: "BTC",
+              state: "SETTLED",
+              created_at: "2026-10-17T10:00:00.000Z",
+              reference: "btc-ref-stub",
+              metadata: { description: "Dépôt Lightning (stub)", tx_hash: "hash_stub_deposit" },
+            },
+            {
+              transaction_id: "tx_stub_payout",
+              type: "WITHDRAWAL_SUCCESS",
+              side: "debit",
+              amount: 1000,
+              currency: "BTC",
+              state: "SETTLED",
+              created_at: "2026-10-16T09:00:00.000Z",
+              reference: "btc-payout-stub",
+              metadata: { description: "Payout Mobile Money (stub)", tx_hash: "hash_stub_payout" },
+            },
+          ],
+          next_cursor: "",
+        },
+      });
     }
 
     // GET /api/payouts/banks/:countryCode — annuaire opérateurs (vide suffit).

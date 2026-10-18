@@ -9,12 +9,28 @@
 const crypto = require("crypto");
 const fs = require("fs");
 
-// Combinaisons secrètes × algorithme à tester.
+// Combinaisons secrètes × algorithme à tester. Les variables d'environnement
+// acceptent plusieurs secrets séparés par des virgules (plusieurs webhooks).
 function candidates() {
   const secrets = [
     { name: "BITNOB_WEBHOOK_SECRET", value: process.env.BITNOB_WEBHOOK_SECRET },
     { name: "BITNOB_CLIENT_SECRET", value: process.env.BITNOB_CLIENT_SECRET },
-  ].filter((s) => s.value);
+  ]
+    .filter((s) => s.value)
+    .flatMap((s) => {
+      const values = [];
+      for (const part of String(s.value).split(",")) {
+        if (!part) continue;
+        const trimmed = part.trim();
+        if (trimmed && trimmed !== part) values.push({ value: part, raw: true });
+        if (trimmed) values.push({ value: trimmed, raw: false });
+      }
+      return values.map((v, index) => ({
+        name:
+          values.length > 1 ? `${s.name}[${index + 1}${v.raw ? ",espaces" : ""}]` : s.name,
+        value: v.value,
+      }));
+    });
 
   const algos = ["sha512", "sha256"]; // la doc Bitnob cite les deux
   const list = [];
@@ -45,7 +61,7 @@ function checkCandidates(rawBody, signatureHeader) {
 }
 
 // Journalise un rapport lisible dans la console serveur.
-function report(rawBody, signatureHeader) {
+function report(rawBody, signatureHeader, headers = {}) {
   const results = checkCandidates(rawBody, signatureHeader);
   const hits = results.filter((r) => r.match);
 
@@ -58,6 +74,24 @@ function report(rawBody, signatureHeader) {
   if (hits.length === 0) {
     console.log("[WEBHOOK DEBUG] ✗ Aucune combinaison ne matche.");
     console.log("[WEBHOOK DEBUG]   → secret inconnu, algorithme différent, ou corps altéré (rawBody ?).");
+    // Sauvegarde du corps rejeté pour analyse hors-ligne (sandbox uniquement).
+    try {
+      const os = require("os");
+      const path = require("path");
+      const dump = path.join(os.tmpdir(), "teranga-webhook-rejected.txt");
+      const content = `signature: ${signatureHeader || ""}\nheaders: ${JSON.stringify(
+        headers || {},
+        null,
+        2
+      )}\n---\n${rawBody || ""}`;
+      fs.writeFileSync(dump, content, "utf8");
+      // Copie horodatée par signature : conserve TOUS les rejets (retries inclus).
+      const short = String(signatureHeader || "sans-signature").replace(/[^a-z0-9]/gi, "").slice(0, 12);
+      fs.writeFileSync(path.join(os.tmpdir(), `teranga-rejet-${short}.txt`), content, "utf8");
+      console.log(`[WEBHOOK DEBUG] corps rejeté sauvegardé : ${dump}`);
+    } catch {
+      /* best effort */
+    }
   } else {
     console.log(`[WEBHOOK DEBUG] ✓ Secret correct = ${hits[0].secret}, algorithme = ${hits[0].algo}`);
   }

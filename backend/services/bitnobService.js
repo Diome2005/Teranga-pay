@@ -105,7 +105,7 @@ async function listTransactions({ limit = 25, currency, type, status, cursor } =
 
 // POST /api/lightning/invoices/:id/simulate-payment — (sandbox uniquement) déclenche un
 //   paiement simulé sur une facture Lightning ouverte. Provoque l'émission d'un webhook
-//   btc.lightning.received.success (~2 s) côté Bitnob, qui pilote ensuite la liquidation.
+//   deposit.success (~2 s) côté Bitnob, qui pilote ensuite la liquidation.
 //   La facture doit être impayée et non expirée (sinon 4xx).
 async function simulateLightningPayment(invoiceId) {
   if (!invoiceId) {
@@ -122,13 +122,29 @@ async function simulateLightningPayment(invoiceId) {
 //   BITNOB_WEBHOOK_SECRET soit BITNOB_CLIENT_SECRET. Plutôt que de parier sur une seule
 //   combinaison, on teste toutes les paires (secret × algorithme) : si l'une matche, le
 //   webhook est authentique. services/webhookDebug.js journalise le combo exact reçu.
+//   BITNOB_WEBHOOK_SECRET accepte PLUSIEURS secrets séparés par des virgules (cas du
+//   dashboard Bitnob avec plusieurs webhooks, chacun avec son propre secret).
 //   Comparaison à temps constant pour éviter les attaques temporelles.
 // Retourne true/false, ou null si AUCUN secret n'est configuré.
 function verifyWebhookSignature(rawBody, signature) {
+  // Chaque variable accepte plusieurs secrets séparés par des virgules.
+  // Un segment est testé TEL QUEL et aussi rogné : le dashboard Bitnob accepte
+  // un secret commençant/finissant par un espace, on doit le vérifier tel quel.
   const secrets = [
     process.env.BITNOB_WEBHOOK_SECRET,
     process.env.BITNOB_CLIENT_SECRET,
-  ].filter(Boolean);
+  ]
+    .filter(Boolean)
+    .flatMap((value) => {
+      const list = [];
+      for (const part of String(value).split(",")) {
+        if (!part) continue;
+        const trimmed = part.trim();
+        if (trimmed && trimmed !== part) list.push(part);
+        if (trimmed) list.push(trimmed);
+      }
+      return [...new Set(list)];
+    });
   if (secrets.length === 0) return null;
   if (!signature) return false;
 

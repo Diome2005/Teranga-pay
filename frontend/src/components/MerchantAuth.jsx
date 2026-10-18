@@ -202,7 +202,7 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
     }
   };
 
-  // Vérifie le code via le backend ; repli sur la comparaison locale si backend absent.
+  // Vérifie le code via le backend (aucun repli local : le code n'existe que côté serveur).
   const verify = async (event) => {
     event.preventDefault();
     setVerifying(true);
