@@ -88,4 +88,12 @@ export async function updateMerchant(token, payload) {
   return data;
 }
 
+// Simule le paiement Lightning d'une facture (sandbox Bitnob) — le webhook
+// deposit.success déclenche ensuite la liquidation réelle vers le Mobile Money.
+// Réservé au marchand propriétaire de la facture (jeton requis).
+export async function simulateInvoice(id, token) {
+  const { data } = await api.post(`/invoices/${id}/simulate-card`, {}, { headers: authHeaders(token) });
+  return data;
+}
+
 export default api;

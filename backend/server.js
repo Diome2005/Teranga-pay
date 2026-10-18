@@ -442,7 +442,9 @@ app.post("/api/invoices", requireMerchant, async (req, res) => {
 
     // Le marchand est identifié par la session (compte email/mot de passe ou OTP) —
     // on ignore tout merchantPhone/merchant du body pour éviter l'usurpation.
-    const merchantPhone = req.session.phone;
+    // Le numéro de RÉCEPTION des FCFA vient de la session (modifiable depuis le
+    // dashboard via PUT /api/merchants/me), avec repli sur l'identité du compte.
+    const merchantPhone = req.session.payoutPhone || req.session.phone;
     const merchant = req.session.shop || "Marchand Teranga";
 
     if (!description) {
@@ -849,17 +851,32 @@ app.post("/api/auth/otp/verify", (req, res) => {
 app.get("/api/merchants/me", requireMerchant, (req, res) => {
   res.json({
     success: true,
-    session: { phone: req.session.phone, shop: req.session.shop, since: req.session.since },
+    session: {
+      phone: req.session.phone,
+      shop: req.session.shop,
+      since: req.session.since,
+      payoutPhone: req.session.payoutPhone || null,
+    },
     merchant: auth.getMerchant(req.session.phone),
   });
 });
 
-// PUT /api/merchants/me — met à jour le profil (ex. { shop: "Ma Boutique" }).
+// PUT /api/merchants/me — met à jour le profil ({ shop, payoutPhone }).
+// `payoutPhone` = numéro Mobile Money qui reçoit les FCFA (liquidation) ;
+// il est validé puis appliqué à toutes les sessions du compte.
 app.put("/api/merchants/me", requireMerchant, (req, res) => {
-  const { shop } = req.body || {};
+  const { shop, payoutPhone } = req.body || {};
+  if (payoutPhone !== undefined) {
+    const result = auth.setPayoutPhone(req.session, payoutPhone);
+    if (!result.ok) return res.status(400).json({ success: false, error: result.error });
+  }
   const updated = auth.updateMerchant(req.session.phone, shop ? { shop } : {});
   if (shop) req.session.shop = shop;
-  res.json({ success: true, merchant: updated });
+  res.json({
+    success: true,
+    merchant: updated,
+    session: { payoutPhone: req.session.payoutPhone || null },
+  });
 });
 
 // Route inconnue -> 404 JSON (le frontend interprète toujours du JSON).

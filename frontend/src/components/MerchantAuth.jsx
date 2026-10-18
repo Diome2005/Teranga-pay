@@ -148,6 +148,7 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
       onAuthenticated?.({
         email: res?.email || email.trim().toLowerCase(),
         phone: session.phone || (digits ? `+221 ${formatPhoneInput(digits)}` : null),
+        payoutPhone: session.payoutPhone || null,
         shop: session.shop || shopName.trim() || DEFAULT_SHOP,
         since: session.since || new Date().toISOString(),
         token: session.token || null,
@@ -213,6 +214,7 @@ export default function MerchantAuth({ onAuthenticated, onBack }) {
       onAuthenticated?.({
         email: res?.email || null,
         phone: session.phone || `+221 ${formatPhoneInput(digits)}`,
+        payoutPhone: session.payoutPhone || null,
         shop: session.shop || DEFAULT_SHOP,
         since: session.since || new Date().toISOString(),
         token: session.token || null,

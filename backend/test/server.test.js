@@ -733,3 +733,54 @@ test("verifyWebhookSignature accepte WEBHOOK_SECRET×sha512 ET CLIENT_SECRET×sh
     process.env.BITNOB_WEBHOOK_SECRET = prev;
   }
 });
+
+// ------------------------------------- numéro de réception (liquidation FCFA)
+test("Numéro de réception : modifiable via PUT /merchants/me, utilisé pour la liquidation", async () => {
+  const email = `payout+${Date.now()}@teranga.sn`;
+  const reg = await jsonFetch("/api/auth/register", {
+    method: "POST",
+    body: { email, password: "motdepasse123", phone: "770003344", shop: "Boutique Payout" },
+  });
+  assert.equal(reg.status, 201);
+  const token = reg.data.session.token;
+  assert.equal(reg.data.session.payoutPhone, null, "par défaut, la réception suit le compte");
+
+  // Numéro invalide -> 400, rien n'est modifié.
+  const bad = await jsonFetch("/api/merchants/me", {
+    method: "PUT",
+    body: { payoutPhone: "123" },
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(bad.status, 400);
+
+  // Numéro valide -> enregistré sur la session courante.
+  const ok = await jsonFetch("/api/merchants/me", {
+    method: "PUT",
+    body: { payoutPhone: "771112233" },
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.session.payoutPhone, "+221771112233");
+
+  const me = await jsonFetch("/api/merchants/me", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(me.data.session.payoutPhone, "+221771112233");
+
+  // La facture créée ensuite porte le nouveau numéro de réception.
+  const inv = await jsonFetch("/api/invoices", {
+    method: "POST",
+    body: { amountXOF: 1000, description: "Test numéro de réception", provider: "wave" },
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(inv.status, 201);
+  assert.equal(inv.data.merchantPhone, "+221771112233");
+
+  // Une nouvelle connexion (nouvelle session) conserve le numéro choisi.
+  const login = await jsonFetch("/api/auth/login", {
+    method: "POST",
+    body: { email, password: "motdepasse123" },
+  });
+  assert.equal(login.status, 200);
+  assert.equal(login.data.session.payoutPhone, "+221771112233");
+});

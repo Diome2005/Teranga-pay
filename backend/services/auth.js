@@ -127,21 +127,58 @@ function verifyOtp(phoneRaw, codeRaw, shop) {
 }
 
 // Ouvre une session et renvoie un jeton opaque.
-function createSession(phone, shop) {
+// `extra` : { email, payoutPhone } — le numéro de RÉCEPTION des FCFA (liquidation)
+// est distinct de l'identité de connexion (`phone`) : il est modifiable par le
+// marchand et persisté sur la fiche marchand / le compte email.
+function createSession(phone, shop, extra = {}) {
   const token = crypto.randomBytes(24).toString("hex");
+  const key = normalizePhone(phone);
+  const merchant = merchants.get(key);
   const session = {
     token,
-    phone,
+    phone: key,
     shop: shop || "Atelier Awa Couture",
     since: new Date().toISOString(),
     expiresAt: nowMs() + SESSION_TTL_SECONDS * 1000,
+    payoutPhone: extra.payoutPhone || (merchant && merchant.payoutPhone) || null,
+    email: extra.email || (merchant && merchant.email) || null,
   };
   sessions.set(token, session);
   // Crée (ou réutilise) la fiche marchand liée à ce numéro.
-  if (!merchants.has(phone)) {
-    merchants.set(phone, { phone, shop: session.shop, createdAt: session.since });
+  if (!merchants.has(key)) {
+    merchants.set(key, { phone: key, shop: session.shop, createdAt: session.since });
   }
   return session;
+}
+
+// Change le numéro de réception des liquidations FCFA du marchand connecté.
+// Persiste sur la session courante, toutes les sessions du même compte, la fiche
+// marchand et le compte email. Le numéro d'identité (`session.phone`) n'est
+// jamais modifié : seul la destination des fonds change.
+function setPayoutPhone(session, phoneRaw) {
+  if (!isValidSenegalPhone(phoneRaw)) {
+    return { ok: false, error: "Numéro Mobile Money invalide (format 9 chiffres, Sénégal)." };
+  }
+  const payoutPhone = normalizePhone(phoneRaw);
+
+  session.payoutPhone = payoutPhone;
+  sessions.set(session.token, session);
+  for (const other of sessions.values()) {
+    if (other.phone === session.phone && other.token !== session.token) {
+      other.payoutPhone = payoutPhone;
+      sessions.set(other.token, other);
+    }
+  }
+
+  updateMerchant(session.phone, { payoutPhone });
+  if (session.email) {
+    const account = accounts.get(session.email);
+    if (account) {
+      account.payoutPhone = payoutPhone;
+      accounts.set(account.email, account);
+    }
+  }
+  return { ok: true, payoutPhone };
 }
 
 // Résout une session à partir du jeton (Bearer). Renvoie null si absente/expirée.
@@ -240,7 +277,7 @@ async function register({ email, password, phone, shop }) {
     merchants.set(p, { phone: p, shop: shopName, email: e, createdAt: account.createdAt });
   }
 
-  const session = createSession(p, shopName);
+  const session = createSession(p, shopName, { email: e });
   return { ok: true, email: e, phone: p, session };
 }
 
@@ -251,7 +288,10 @@ function login({ email, password }) {
   if (!account || !verifyPassword(password, account.passwordHash)) {
     return { ok: false, error: "Email ou mot de passe incorrect." };
   }
-  const session = createSession(account.phone, account.shop);
+  const session = createSession(account.phone, account.shop, {
+    email: e,
+    payoutPhone: account.payoutPhone,
+  });
   return { ok: true, email: e, phone: account.phone, session };
 }
 
@@ -261,6 +301,7 @@ module.exports = {
   requestOtp,
   verifyOtp,
   createSession,
+  setPayoutPhone,
   getSession,
   getMerchant,
   updateMerchant,

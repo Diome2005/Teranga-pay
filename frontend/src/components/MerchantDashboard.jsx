@@ -11,7 +11,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { createPaymentLink, listPaymentLinks, listWalletTransactions, updateMerchant } from "../services/api";
+import { createPaymentLink, getPaymentStatus, listPaymentLinks, listWalletTransactions, simulateInvoice, updateMerchant } from "../services/api";
 
 const STORAGE_PREFIX = "teranga-invoices";
 const DEFAULT_SHOP = "Atelier Awa Couture";
@@ -580,7 +580,7 @@ function InvoiceRow({ invoice, copied, shared, onOpen, onShowQr, onRemove, onCop
 /* ============================================================
    Modale « Lien de paiement » (QR + lien à partager au client)
    ============================================================ */
-function PaymentLinkModal({ invoice, copied, onClose, onCopy, onPreview }) {
+function PaymentLinkModal({ invoice, copied, simulating, onClose, onCopy, onPreview, onSimulate }) {
   if (!invoice) return null;
   const url = paymentUrl(invoice.id);
   const provider = PROVIDERS.find((p) => p.id === invoice.provider);
@@ -645,6 +645,19 @@ function PaymentLinkModal({ invoice, copied, onClose, onCopy, onPreview }) {
             Partager
           </a>
         </div>
+
+        <button
+          type="button"
+          onClick={onSimulate}
+          disabled={simulating || invoice.status === "paid"}
+          className="mt-2 w-full rounded-xl border border-dashed border-emerald-500/40 py-2.5 text-xs font-semibold text-accent transition hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {invoice.status === "paid"
+            ? "Paiement reçu"
+            : simulating
+              ? "Simulation en cours…"
+              : "Simuler un paiement (démo sandbox)"}
+        </button>
 
         <div className="mt-3 flex items-center justify-between gap-2 border-t border-line/5 pt-3 text-xs">
           <span className="text-ink-faint">
@@ -830,12 +843,17 @@ export default function MerchantDashboard({
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
   const [provider, setProvider] = useState(PROVIDERS[0].id);
-  // Numéro de liquidation : celui du compte connecté. Le backend dérive TOUJOURS
-  // le marchand de la session (anti-usurpation) — ce champ est donc en lecture
-  // seule, on ne fait que l'afficher.
-  const payoutPhone = phoneDigits(session?.phone || "");
+  // Numéro de réception des FCFA (liquidation) : modifiable par le marchand.
+  // Le backend garde l'identité du compte (session, anti-usurpation) ; ce numéro
+  // ne change que la destination de l'argent (PUT /api/merchants/me).
+  const payoutPhone = phoneDigits(session?.payoutPhone || session?.phone || "");
+  const [payoutPhoneInput, setPayoutPhoneInput] = useState(() =>
+    formatPhoneInput(phoneDigits(session?.payoutPhone || session?.phone || ""))
+  );
+  const [phoneSaved, setPhoneSaved] = useState(false);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [simulating, setSimulating] = useState(false);
   const [toast, setToast] = useState("");
   const [copiedId, setCopiedId] = useState(null);
   const [sharedId, setSharedId] = useState(null);
@@ -992,8 +1010,9 @@ export default function MerchantDashboard({
       setError("Ajoutez une description à la facture.");
       return;
     }
-    if (payoutPhone.length !== 9) {
-      setError("Votre compte n'a pas de numéro Mobile Money valide — reconnectez-vous.");
+    const payoutDigits = phoneDigits(payoutPhoneInput);
+    if (payoutDigits.length !== 9) {
+      setError("Saisissez le numéro Mobile Money qui doit recevoir les FCFA (9 chiffres).");
       return;
     }
 
@@ -1002,6 +1021,14 @@ export default function MerchantDashboard({
     setCreating(true);
 
     try {
+      // Numéro de réception modifié ? On l'enregistre d'abord sur le compte ;
+      // la liquidation partira ensuite vers ce numéro.
+      if (payoutDigits !== payoutPhone) {
+        await updateMerchant(session?.token, { payoutPhone: payoutDigits });
+        onSessionChange?.({ ...session, payoutPhone: payoutDigits });
+        setPhoneSaved(true);
+        setTimeout(() => setPhoneSaved(false), 2500);
+      }
       // Le backend ignore tout marchand venant du body : il utilise la session
       // (merchantPhone, merchant, shop). On n'envoie que les champs de la facture.
       const remote = await createPaymentLink(
@@ -1025,6 +1052,44 @@ export default function MerchantDashboard({
       );
     } finally {
       setCreating(false);
+    }
+  };
+
+  // Démo sandbox : simule le paiement Lightning de la facture ouverte dans la
+  // modale, puis suit le statut jusqu'à « payée » (webhook deposit.success).
+  const simulatePayment = async () => {
+    const id = modalInvoice?.id;
+    if (!id) return;
+    setSimulating(true);
+    try {
+      await simulateInvoice(id, session?.token);
+      showToast("Paiement simulé — confirmation en route…");
+      for (let i = 0; i < 15; i += 1) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const st = await getPaymentStatus(id);
+          if (st.status === "paid") {
+            setInvoices((prev) =>
+              prev.map((inv) =>
+                inv.id === id
+                  ? { ...inv, status: "paid", paidAt: st.paidAt || inv.paidAt, payoutStatus: st.payoutStatus || inv.payoutStatus }
+                  : inv
+              )
+            );
+            setModalInvoice((m) => (m && m.id === id ? { ...m, status: "paid" } : m));
+            showToast(
+              st.payoutStatus ? `Paiement reçu — liquidation : ${st.payoutStatus}.` : "Paiement reçu !"
+            );
+            break;
+          }
+        } catch {
+          /* réseau : on retente */
+        }
+      }
+    } catch (err) {
+      setError(err?.response?.data?.error || "Simulation impossible — réessayez.");
+    } finally {
+      setSimulating(false);
     }
   };
 
@@ -1342,9 +1407,9 @@ export default function MerchantDashboard({
 
                 <div>
                   <label className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
-                    Numéro Mobile Money
+                    Numéro Mobile Money (réception FCFA)
                   </label>
-                  <div className="mt-1.5 flex items-center rounded-xl border border-line/10 bg-base/40">
+                  <div className="mt-1.5 flex items-center rounded-xl border border-line/10 bg-base/40 focus-within:border-emerald-400/50">
                     <span className="flex items-center gap-1.5 border-r border-line/10 px-3 py-2.5 text-sm text-ink-subtle">
                       <img
                         src={PROVIDERS.find((p) => p.id === provider)?.logo}
@@ -1353,13 +1418,21 @@ export default function MerchantDashboard({
                       />
                       +221
                     </span>
-                    <span className="w-full px-3 py-2.5 font-mono text-sm text-ink">
-                      {formatPhoneInput(payoutPhone) || "—"}
-                    </span>
+                    <input
+                      type="tel"
+                      inputMode="numeric"
+                      value={payoutPhoneInput}
+                      onChange={(e) => setPayoutPhoneInput(formatPhoneInput(e.target.value))}
+                      placeholder="77 123 45 67"
+                      className="w-full bg-transparent px-3 py-2.5 font-mono text-sm text-ink outline-none placeholder:text-ink-faint"
+                    />
                   </div>
                   <p className="mt-1.5 text-[11px] text-ink-faint">
-                    Numéro de votre compte — les fonds y sont liquidés automatiquement
-                    ({PROVIDERS.find((p) => p.id === provider)?.name}).
+                    {phoneDigits(payoutPhoneInput) !== payoutPhone
+                      ? "Nouveau numéro : il sera enregistré à la création du lien."
+                      : phoneSaved
+                        ? "Numéro enregistré — les FCFA seront liquidés dessus."
+                        : "Numéro qui reçoit les FCFA — modifiable à tout moment."}
                   </p>
                 </div>
 
@@ -1455,11 +1528,13 @@ export default function MerchantDashboard({
       <PaymentLinkModal
         invoice={modalInvoice}
         copied={copiedLink}
+        simulating={simulating}
         onClose={() => {
           setModalInvoice(null);
           setCopiedLink(false);
         }}
         onCopy={() => copyLink(modalInvoice)}
+        onSimulate={simulatePayment}
         onPreview={() => {
           const id = modalInvoice?.id;
           setModalInvoice(null);
