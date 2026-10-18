@@ -15,7 +15,7 @@ import {
   verifyOtp,
 } from "../services/api";
 
-const PAGE_BG = "/images/dakar-city.jpg";
+const PAGE_BG = "/images/Accueil/accueil.jpg";
 const OTP_COOLDOWN = 30;
 const DEFAULT_SHOP = "Atelier Awa Couture";
 

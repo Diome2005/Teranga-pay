@@ -17,3 +17,4 @@ backend/data/
 *.log
 *.err
 backend_log.txt
+vite_log.txt

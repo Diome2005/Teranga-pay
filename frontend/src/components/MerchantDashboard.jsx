@@ -15,7 +15,7 @@ import { createPaymentLink, getPaymentStatus, listPaymentLinks, listWalletTransa
 
 const STORAGE_PREFIX = "teranga-invoices";
 const DEFAULT_SHOP = "Atelier Awa Couture";
-const PAGE_BG = "/images/dakar-city.jpg";
+const PAGE_BG = "/images/Accueil/accueil.jpg";
 
 const PROVIDERS = [
   { id: "wave", name: "Wave", logo: "/logos/wave.jfif" },
@@ -963,6 +963,8 @@ export default function MerchantDashboard({
   const shop = session?.shop || DEFAULT_SHOP;
   const storageKey = `${STORAGE_PREFIX}:${session?.phone || "inconnu"}`;
   const [tab, setTab] = useState("dashboard");
+  // Vue « création seule » : n'affiche que le formulaire de nouvelle facture
+  const [createOnly, setCreateOnly] = useState(false);
   const [invoices, setInvoices] = useState(() => loadInvoices(storageKey));
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
@@ -1292,7 +1294,10 @@ export default function MerchantDashboard({
               ].map((t) => (
                 <button
                   key={t.id}
-                  onClick={() => setTab(t.id)}
+                  onClick={() => {
+                    setTab(t.id);
+                    setCreateOnly(false);
+                  }}
                   className={`rounded-lg px-3.5 py-1.5 text-sm font-medium transition ${
                     tab === t.id ? "bg-emerald-500 text-slate-950" : "text-ink-muted hover:text-ink"
                   }`}
@@ -1372,6 +1377,8 @@ export default function MerchantDashboard({
           </div>
         ) : (
           <>
+        {!createOnly && (
+          <>
         {/* ===================== En-tête de page ===================== */}
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
@@ -1385,13 +1392,14 @@ export default function MerchantDashboard({
               Créez un lien de paiement et suivez vos encaissements en FCFA.
             </p>
           </div>
-          <a
-            href="#nouvelle-facture"
+          <button
+            type="button"
+            onClick={() => setCreateOnly(true)}
             className="inline-flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
           >
             <IconPlus className="h-4 w-4" />
             Nouvelle facture
-          </a>
+          </button>
         </div>
 
         {/* ===================== Statistiques ===================== */}
@@ -1441,12 +1449,32 @@ export default function MerchantDashboard({
             onRefresh={refreshTransactions}
           />
         </div>
+          </>
+        )}
 
         {/* ===================== Formulaire + Historique ===================== */}
-        <div className="mt-8 grid gap-6 lg:grid-cols-3">
+        <div
+          className={
+            createOnly ? "mx-auto mt-2 w-full max-w-xl" : "mt-8 grid gap-6 lg:grid-cols-3"
+          }
+        >
           {/* Formulaire */}
-          <section id="nouvelle-facture" className="lg:col-span-1">
-            <div className="rounded-2xl border border-line/10 bg-card/70 p-6 backdrop-blur lg:sticky lg:top-24">
+          <section id="nouvelle-facture" className={createOnly ? "w-full" : "lg:col-span-1"}>
+            <div
+              className={`rounded-2xl border border-line/10 bg-card/70 p-6 backdrop-blur ${
+                createOnly ? "" : "lg:sticky lg:top-24"
+              }`}
+            >
+              {createOnly && (
+                <button
+                  type="button"
+                  onClick={() => setCreateOnly(false)}
+                  className="mb-4 inline-flex items-center gap-1.5 rounded-lg border border-line/10 px-3 py-1.5 text-xs font-semibold text-ink-muted transition hover:border-emerald-500/40 hover:bg-emerald-500/10 hover:text-accent"
+                >
+                  <IconBack className="h-3.5 w-3.5" />
+                  Retour au tableau de bord
+                </button>
+              )}
               <div className="flex items-center gap-2">
                 <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-accent">
                   <IconPlus className="h-4 w-4" />
@@ -1587,7 +1615,8 @@ export default function MerchantDashboard({
             </div>
           </section>
 
-          {/* Historique */}
+          {/* Historique (masqué en mode création seule) */}
+          {!createOnly && (
           <section className="lg:col-span-2">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="text-base font-bold">Historique des factures</h2>
@@ -1647,6 +1676,7 @@ export default function MerchantDashboard({
               )}
             </div>
           </section>
+          )}
         </div>
           </>
         )}

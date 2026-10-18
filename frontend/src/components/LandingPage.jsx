@@ -599,15 +599,7 @@ const FOOTER_CHANNELS = [
   "Wallet of Satoshi · Muun",
 ];
 
-/* Photos d'arrière-plan du Hero (fichiers dans public/images) */
-const HERO_IMAGES = [
-  "/images/dakar-city.jpg",
-  "/images/street.jpg",
-  "/images/beach.jpg",
-  "/images/pirogues.jpg",
-];
-
-/* Image de fond globale de la page (faible opacité) */
+/* Image de fond de la landing : hero net (accueil.jpg) + voile global discret */
 const PAGE_BG = "/images/Accueil/accueil.jpg";
 
 const ADVANTAGES = [
@@ -653,7 +645,6 @@ const STEPS = [
    Composant principal
    ============================================================ */
 export default function LandingPage({ onEnterDashboard }) {
-  const [slide, setSlide] = useState(0);
   const [demo, setDemo] = useState("dashboard");
   const [menuOpen, setMenuOpen] = useState(false);
   const [active, setActive] = useState("accueil");
@@ -662,11 +653,6 @@ export default function LandingPage({ onEnterDashboard }) {
   const [theme, setTheme] = useState(() =>
     typeof document !== "undefined" ? document.documentElement.dataset.theme || "dark" : "dark"
   );
-
-  useEffect(() => {
-    const timer = setInterval(() => setSlide((s) => (s + 1) % HERO_IMAGES.length), 5000);
-    return () => clearInterval(timer);
-  }, []);
 
   // Application + mémorisation du thème
   useEffect(() => {
@@ -811,23 +797,11 @@ export default function LandingPage({ onEnterDashboard }) {
 
       {/* ===================== Hero (fond animé, toujours sombre) ===================== */}
       <section id="accueil" className="relative overflow-hidden">
-        {/* Carrousel d'images d'arrière-plan animé en boucle (zoom Ken Burns) */}
-        <div className="absolute inset-0">
-          {HERO_IMAGES.map((src, index) => (
-            <div
-              key={src}
-              className={`absolute inset-0 origin-center transform transition-opacity duration-[2000ms] ease-in-out will-change-transform ${
-                index === slide ? "opacity-100 animate-drift" : "opacity-0"
-              }`}
-              style={{
-                backgroundImage: `url('${src}')`,
-                backgroundSize: "cover",
-                backgroundPosition: "center",
-                filter: "brightness(0.92)",
-              }}
-            />
-          ))}
-        </div>
+        {/* Fond unique et net : accueil.jpg (sans filtre ni carrousel) */}
+        <div
+          className="absolute inset-0 bg-cover bg-center"
+          style={{ backgroundImage: `url('${PAGE_BG}')` }}
+        />
 
         {/* Orbes flottantes */}
         <div className="pointer-events-none absolute inset-0">
@@ -838,9 +812,9 @@ export default function LandingPage({ onEnterDashboard }) {
           />
         </div>
 
-        {/* Overlay dégradé sombre pour la lisibilité */}
-        <div className="absolute inset-0 bg-gradient-to-b from-slate-950/90 via-slate-950/80 to-slate-950" />
-        <div className="absolute inset-0 bg-gradient-to-r from-slate-950 via-slate-950/60 to-transparent" />
+        {/* Voiles légers : image bien visible, texte restant lisible */}
+        <div className="absolute inset-0 bg-gradient-to-b from-slate-950/45 via-slate-950/15 to-slate-950" />
+        <div className="absolute inset-0 bg-gradient-to-r from-slate-950/75 via-slate-950/25 to-transparent" />
 
         {/* Motif grille subtil */}
         <div
