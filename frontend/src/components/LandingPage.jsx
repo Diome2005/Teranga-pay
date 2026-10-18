@@ -608,7 +608,7 @@ const HERO_IMAGES = [
 ];
 
 /* Image de fond globale de la page (faible opacité) */
-const PAGE_BG = "/images/dakar-city.jpg";
+const PAGE_BG = "/images/Accueil/accueil.jpg";
 
 const ADVANTAGES = [
   {
