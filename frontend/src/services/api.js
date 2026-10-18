@@ -50,6 +50,12 @@ export async function getPaymentStatus(id) {
   return data;
 }
 
+// Avis client après paiement : note 1-5 + commentaire optionnel (route publique).
+export async function sendFeedback(id, payload) {
+  const { data } = await api.post(`/invoices/${id}/feedback`, payload);
+  return data;
+}
+
 // --- Étape 6 : auth marchand (email + mot de passe, et OTP passwordless) ---
 
 // Crée un compte marchand (email + mot de passe + numéro Mobile Money)

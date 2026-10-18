@@ -182,6 +182,35 @@ const IconClose = (props) => (
     <path d="M18 6 6 18M6 6l12 12" />
   </Svg>
 );
+// Étoile d'avis client (pleine ou contour) — `filled` pilote le remplissage.
+const IconStar = ({ filled, ...props }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill={filled ? "currentColor" : "none"}
+    stroke="currentColor"
+    strokeWidth="1.6"
+    strokeLinejoin="round"
+    aria-hidden="true"
+    {...props}
+  >
+    <path d="M12 3.5l2.6 5.3 5.9.9-4.2 4.1 1 5.8-5.3-2.8-5.3 2.8 1-5.8L3.5 9.7l5.9-.9L12 3.5z" />
+  </svg>
+);
+
+// Rangée d'étoiles en lecture seule (avis client reçu).
+function Stars({ value, className = "h-3.5 w-3.5" }) {
+  return (
+    <span className="inline-flex items-center gap-0.5">
+      {[1, 2, 3, 4, 5].map((n) => (
+        <IconStar
+          key={n}
+          filled={n <= value}
+          className={`${className} ${n <= value ? "text-amber-400" : "text-ink-faint/30"}`}
+        />
+      ))}
+    </span>
+  );
+}
 
 /* ---------------------- Helpers ======================= */
 function loadInvoices(key) {
@@ -273,6 +302,7 @@ function fromApi(inv) {
     amountSat: inv.amountSat,
     checkout_url: inv.checkout_url,
     payoutStatus: inv.payoutStatus,
+    feedback: inv.feedback || null,
   };
 }
 
@@ -327,7 +357,37 @@ function StatCard({ icon: Icon, label, value, unit, hint, accent }) {
   );
 }
 
+// Courbe d'activité (7 jours) — tracé lissé + aire dégradée, sans dépendance externe.
 function ActivityChart({ bars, max }) {
+  const W = 700;
+  const H = 150;
+  const PAD_TOP = 20;
+  const PAD_BOTTOM = 14;
+  const innerH = H - PAD_TOP - PAD_BOTTOM;
+  const count = Math.max(bars.length, 1);
+  const stepX = W / count;
+  const points = bars.map((bar, i) => {
+    const ratio = max > 0 ? Math.min(bar.total / max, 1) : 0;
+    return {
+      ...bar,
+      x: stepX * (i + 0.5),
+      y: PAD_TOP + innerH * (1 - ratio),
+    };
+  });
+
+  // Tracé lissé : points de contrôle horizontaux (pas de dépassement en Y).
+  const line = points.reduce((d, p, i) => {
+    if (i === 0) return `M ${p.x} ${p.y}`;
+    const prev = points[i - 1];
+    return `${d} C ${prev.x + stepX / 3} ${prev.y} ${p.x - stepX / 3} ${p.y} ${p.x} ${p.y}`;
+  }, "");
+  const first = points[0];
+  const last = points[points.length - 1];
+  const area =
+    first && last
+      ? `${line} L ${last.x} ${H - PAD_BOTTOM} L ${first.x} ${H - PAD_BOTTOM} Z`
+      : "";
+
   return (
     <div className="rounded-2xl border border-line/10 bg-card/60 p-5 backdrop-blur">
       <div className="flex items-center justify-between">
@@ -342,24 +402,61 @@ function ActivityChart({ bars, max }) {
         </div>
       </div>
 
-      <div className="mt-6 flex h-32 items-end gap-2">
-        {bars.map((bar) => {
-          const pct = max > 0 ? Math.round((bar.total / max) * 100) : 0;
-          return (
-            <div key={bar.date.toISOString()} className="group flex flex-1 flex-col items-center gap-2">
-              <span className="text-[10px] font-semibold text-ink-faint opacity-0 transition group-hover:opacity-100">
-                {bar.total > 0 ? formatXOF(bar.total) : "—"}
-              </span>
-              <div className="flex w-full flex-1 items-end">
-                <div
-                  className="w-full rounded-t-lg bg-gradient-to-t from-emerald-500/30 to-emerald-400 transition-all duration-500 group-hover:from-emerald-500/50"
-                  style={{ height: `${Math.max(pct, bar.total > 0 ? 8 : 2)}%` }}
-                />
-              </div>
-              <span className="text-[10px] text-ink-faint">{formatDayLabel(bar.date)}</span>
-            </div>
-          );
-        })}
+      <div className="relative mt-6 h-32">
+        <svg
+          className="absolute inset-0 h-full w-full overflow-visible"
+          viewBox={`0 0 ${W} ${H}`}
+          preserveAspectRatio="none"
+          aria-hidden="true"
+        >
+          <defs>
+            <linearGradient id="activityFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="rgb(52 211 153)" stopOpacity="0.28" />
+              <stop offset="100%" stopColor="rgb(52 211 153)" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <line
+            x1="0"
+            y1={H - PAD_BOTTOM}
+            x2={W}
+            y2={H - PAD_BOTTOM}
+            stroke="currentColor"
+            className="text-ink-faint/20"
+            vectorEffect="non-scaling-stroke"
+          />
+          {area && <path d={area} fill="url(#activityFill)" />}
+          {line && (
+            <path
+              d={line}
+              fill="none"
+              stroke="rgb(52 211 153)"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+        </svg>
+
+        {points.map((p, i) => (
+          <div
+            key={p.date.toISOString()}
+            className="group absolute -translate-x-1/2 -translate-y-1/2"
+            style={{ left: `${((i + 0.5) / count) * 100}%`, top: `${(p.y / H) * 100}%` }}
+          >
+            <span className="pointer-events-none absolute bottom-full left-1/2 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border border-line/10 bg-card px-2 py-0.5 text-[10px] font-semibold text-ink-muted opacity-0 shadow-lg transition group-hover:opacity-100">
+              {p.total > 0 ? formatXOF(p.total) : "—"}
+            </span>
+            <span className="block h-2.5 w-2.5 rounded-full bg-emerald-400 ring-4 ring-emerald-400/15 transition group-hover:scale-125 group-hover:bg-emerald-300" />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-2 flex">
+        {bars.map((bar) => (
+          <span key={bar.date.toISOString()} className="flex-1 text-center text-[10px] text-ink-faint">
+            {formatDayLabel(bar.date)}
+          </span>
+        ))}
       </div>
     </div>
   );
@@ -525,6 +622,15 @@ function InvoiceRow({ invoice, copied, shared, onOpen, onShowQr, onRemove, onCop
               {paid ? <IconCheck className="h-3 w-3" /> : <IconClock className="h-3 w-3" />}
               {paid ? "Payé" : "En attente"}
             </span>
+            {invoice.feedback && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-400"
+                title={invoice.feedback.comment || "Avis client"}
+              >
+                <IconStar filled className="h-3 w-3" />
+                {invoice.feedback.rating}/5
+              </span>
+            )}
             <span className="font-mono text-[11px] text-ink-faint">{invoice.reference}</span>
           </div>
           <p className="mt-2 truncate text-sm font-semibold text-ink">{invoice.description}</p>
@@ -658,6 +764,24 @@ function PaymentLinkModal({ invoice, copied, simulating, onClose, onCopy, onPrev
               ? "Simulation en cours…"
               : "Simuler un paiement (démo sandbox)"}
         </button>
+
+        {/* Avis laissé par le client après paiement (note + suggestions) */}
+        {invoice.feedback && (
+          <div className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3 text-left">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-amber-400">Avis client</span>
+              <Stars value={invoice.feedback.rating} />
+            </div>
+            {invoice.feedback.comment && (
+              <p className="mt-1.5 text-xs italic text-ink-muted">« {invoice.feedback.comment} »</p>
+            )}
+            {invoice.feedback.createdAt && (
+              <p className="mt-1 text-[10px] text-ink-faint">
+                Reçu le {new Date(invoice.feedback.createdAt).toLocaleString("fr-FR")}
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="mt-3 flex items-center justify-between gap-2 border-t border-line/5 pt-3 text-xs">
           <span className="text-ink-faint">
@@ -1080,6 +1204,10 @@ export default function MerchantDashboard({
             showToast(
               st.payoutStatus ? `Paiement reçu — liquidation : ${st.payoutStatus}.` : "Paiement reçu !"
             );
+            // Paiement confirmé : bascule automatique sur le guichet client
+            // (écran « Paiement effectué avec succès » + formulaire d'avis),
+            // sans devoir cliquer sur « Aperçu client ».
+            onOpenCheckout?.(id);
             break;
           }
         } catch {

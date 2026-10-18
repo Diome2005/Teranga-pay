@@ -112,6 +112,9 @@ function normalizeInvoice(entry, { publicView = false } = {}) {
     paidAt: entry.paidAt || null,
     createdAt: entry.createdAt || null,
     expiresAt: entry.expiresAt || null,
+    // Avis client post-paiement (note 1-5 + commentaire) — affiché au marchand
+    // dans le dashboard, et au client pour accuser réception de son envoi.
+    feedback: entry.feedback || null,
     checkout_url: `${process.env.FRONTEND_URL || "http://localhost:5173"}/?pay=${entry.reference}`,
   };
 }
@@ -621,6 +624,51 @@ app.get("/api/invoices/:id/status", async (req, res) => {
   }
 
   res.json({ success: true, ...normalizeInvoice(entry, { publicView: true }) });
+});
+
+// POST /api/invoices/:id/feedback — avis client après paiement (route publique).
+//   Body : { rating (1..5, requis), comment (optionnel, 500 caractères max) }
+//   Un seul avis par facture, uniquement si le paiement est confirmé. L'avis est
+//   stocké sur la facture et renvoyé au dashboard marchand (normalizeInvoice).
+app.post("/api/invoices/:id/feedback", (req, res) => {
+  const entry = findInvoice(req.params.id);
+  if (!entry) {
+    return res
+      .status(404)
+      .json({ success: false, error: `Facture "${req.params.id}" introuvable.` });
+  }
+  if (entry.status !== "paid") {
+    return res.status(400).json({
+      success: false,
+      error: "Le paiement doit être confirmé avant de laisser un avis.",
+    });
+  }
+
+  const rating = Math.round(Number(req.body?.rating));
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res
+      .status(400)
+      .json({ success: false, error: "La note doit être un nombre entier entre 1 et 5." });
+  }
+  const comment = String(req.body?.comment || "").trim().slice(0, 500);
+
+  if (entry.feedback) {
+    return res.status(409).json({
+      success: false,
+      error: "Un avis a déjà été envoyé pour cette facture.",
+      feedback: entry.feedback,
+    });
+  }
+
+  entry.feedback = { rating, comment, createdAt: new Date().toISOString() };
+  invoicesStore.set(entry.reference, entry); // persistance sur disque
+  console.log(
+    `[teranga-pay] Avis client reçu pour ${entry.reference} : ${rating}/5${
+      comment ? " avec commentaire" : ""
+    }.`
+  );
+
+  res.status(201).json({ success: true, feedback: entry.feedback });
 });
 
 // POST /api/invoices/:id/simulate-card — encaissement simulé (sans carte réelle).

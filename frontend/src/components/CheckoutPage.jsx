@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import ReceiptModal from "./ReceiptModal";
-import { getPaymentLink, getPaymentStatus } from "../services/api";
+import { getPaymentLink, getPaymentStatus, sendFeedback } from "../services/api";
 
 const EXPIRY_SECONDS = 15 * 60;
 
@@ -63,6 +63,22 @@ function IconClock({ className }) {
   );
 }
 
+function IconStar({ className, filled }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M12 3.5l2.6 5.3 5.9.9-4.2 4.1 1 5.8-5.3-2.8-5.3 2.8 1-5.8L3.5 9.7l5.9-.9L12 3.5z" />
+    </svg>
+  );
+}
+
 function formatCountdown(total) {
   const mm = String(Math.floor(total / 60)).padStart(2, "0");
   const ss = String(total % 60).padStart(2, "0");
@@ -79,6 +95,13 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
   const [secondsLeft, setSecondsLeft] = useState(EXPIRY_SECONDS);
   const [copied, setCopied] = useState(false);
   const [paidAt, setPaidAt] = useState("");
+  // Avis client post-paiement (note 1-5 + commentaire).
+  const [feedback, setFeedback] = useState(null);
+  const [rating, setRating] = useState(0);
+  const [hoverRating, setHoverRating] = useState(0);
+  const [comment, setComment] = useState("");
+  const [feedbackSending, setFeedbackSending] = useState(false);
+  const [feedbackError, setFeedbackError] = useState("");
 
   // Chargement de la facture depuis le backend.
   useEffect(() => {
@@ -102,6 +125,7 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
           return;
         }
         setInvoice(data);
+        if (data.feedback) setFeedback(data.feedback);
         if (data.status === "paid") {
           setStatus("paid");
           if (data.paidAt) setPaidAt(new Date(data.paidAt).toLocaleString("fr-FR"));
@@ -159,10 +183,35 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, invoice?.id]);
 
+  // Paiement confirmé : le QR disparaît au profit de l'écran de succès
+  // (le reçu reste accessible via le bouton « Voir le reçu », sans recouvrir
+  // le formulaire d'avis).
   const confirmPayment = () => {
     setStatus("paid");
     setPaidAt(new Date().toLocaleString("fr-FR"));
-    setShowReceipt(true);
+  };
+
+  // Envoi de l'avis client (note + commentaire) au backend, qui le transmet
+  // au marchand via le dashboard.
+  const submitFeedback = async () => {
+    if (!rating || !invoice?.id || feedbackSending) return;
+    setFeedbackSending(true);
+    setFeedbackError("");
+    try {
+      const res = await sendFeedback(invoice.id, { rating, comment: comment.trim() });
+      setFeedback(res.feedback || { rating, comment: comment.trim(), createdAt: new Date().toISOString() });
+    } catch (err) {
+      const already = err?.response?.status === 409;
+      if (already && err?.response?.data?.feedback) {
+        setFeedback(err.response.data.feedback);
+      } else {
+        setFeedbackError(
+          err?.response?.data?.error || "Envoi impossible pour le moment. Réessayez."
+        );
+      }
+    } finally {
+      setFeedbackSending(false);
+    }
   };
 
   const copyBolt11 = async () => {
@@ -296,20 +345,117 @@ export default function CheckoutPage({ invoiceId, onViewChange }) {
               )}
 
               {status === "paid" && (
-                <div className="flex flex-col items-center py-8 text-center">
-                  <div className="flex h-14 w-14 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 text-accent">
-                    <IconCheck className="h-7 w-7" />
+                <div className="py-2">
+                  {/* Écran de succès — remplace le QR dès confirmation du paiement */}
+                  <div className="flex flex-col items-center text-center">
+                    <div className="relative flex h-16 w-16 items-center justify-center rounded-full border border-emerald-500/30 bg-emerald-500/10 text-accent">
+                      <span className="absolute inset-0 animate-ping rounded-full bg-emerald-500/10" />
+                      <IconCheck className="h-8 w-8" />
+                    </div>
+                    <p className="mt-4 text-lg font-bold">Paiement effectué avec succès</p>
+                    <p className="mt-1 text-sm text-ink-subtle">
+                      Votre paiement de{" "}
+                      <span className="font-semibold text-ink">
+                        {Number(invoice.amount).toLocaleString("fr-FR")} {invoice.currency}
+                      </span>{" "}
+                      auprès de {invoice.merchant} a bien été reçu.
+                    </p>
+                    <p className="mt-1 text-xs text-ink-faint">
+                      Liquidation {invoice.liquidation} en cours{paidAt ? ` · ${paidAt}` : ""}
+                    </p>
+                    <button
+                      onClick={() => setShowReceipt(true)}
+                      className="mt-5 rounded-xl bg-emerald-500 px-6 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
+                    >
+                      Voir le reçu
+                    </button>
                   </div>
-                  <p className="mt-4 font-bold">Paiement confirmé</p>
-                  <p className="mt-1 text-sm text-ink-subtle">
-                    Liquidation vers {invoice.liquidation} en cours.
-                  </p>
-                  <button
-                    onClick={() => setShowReceipt(true)}
-                    className="mt-5 rounded-xl bg-emerald-500 px-6 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
-                  >
-                    Voir le reçu
-                  </button>
+
+                  {/* Avis client : note + suggestions transmises au marchand */}
+                  <div className="mt-6 border-t border-line/5 pt-5">
+                    {feedback ? (
+                      <div className="flex flex-col items-center text-center">
+                        <div className="flex items-center gap-1">
+                          {[1, 2, 3, 4, 5].map((n) => (
+                            <IconStar
+                              key={n}
+                              filled={n <= feedback.rating}
+                              className={`h-5 w-5 ${
+                                n <= feedback.rating ? "text-amber-400" : "text-ink-faint/30"
+                              }`}
+                            />
+                          ))}
+                        </div>
+                        <p className="mt-2 text-sm font-semibold">Merci pour votre retour !</p>
+                        <p className="mt-1 text-xs text-ink-subtle">
+                          Votre avis a bien été transmis à {invoice.merchant}.
+                        </p>
+                        {feedback.comment && (
+                          <p className="mt-3 w-full rounded-lg border border-line/10 bg-band/5 px-3 py-2 text-left text-xs italic text-ink-muted">
+                            « {feedback.comment} »
+                          </p>
+                        )}
+                      </div>
+                    ) : (
+                      <>
+                        <p className="text-sm font-semibold">Comment s'est passée votre expérience ?</p>
+                        <p className="mt-1 text-xs text-ink-subtle">
+                          Notez {invoice.merchant} — vos remarques et suggestions l'aident à s'améliorer.
+                        </p>
+
+                        <div
+                          className="mt-3 flex justify-center gap-1.5"
+                          onMouseLeave={() => setHoverRating(0)}
+                        >
+                          {[1, 2, 3, 4, 5].map((n) => {
+                            const active = n <= (hoverRating || rating);
+                            return (
+                              <button
+                                key={n}
+                                type="button"
+                                onClick={() => setRating(n)}
+                                onMouseEnter={() => setHoverRating(n)}
+                                aria-label={`${n} étoile${n > 1 ? "s" : ""}`}
+                                className="transition hover:scale-110"
+                              >
+                                <IconStar
+                                  filled={active}
+                                  className={`h-7 w-7 ${active ? "text-amber-400" : "text-ink-faint/30"}`}
+                                />
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <textarea
+                          value={comment}
+                          onChange={(e) => setComment(e.target.value)}
+                          rows={3}
+                          maxLength={500}
+                          placeholder="Une suggestion, une proposition, un commentaire… (optionnel)"
+                          className="mt-3 w-full resize-none rounded-xl border border-line/10 bg-base/40 px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-emerald-400/50 focus:outline-none"
+                        />
+
+                        {feedbackError && (
+                          <p className="mt-2 text-xs text-rose-400">{feedbackError}</p>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={submitFeedback}
+                          disabled={!rating || feedbackSending}
+                          className="mt-3 w-full rounded-xl bg-emerald-500 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {feedbackSending ? "Envoi en cours…" : "Envoyer mon avis"}
+                        </button>
+                        {!rating && (
+                          <p className="mt-2 text-center text-[11px] text-ink-faint">
+                            Sélectionnez une note pour envoyer votre avis.
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
               )}
 

@@ -314,6 +314,73 @@ test("Webhook Bitnob signé marque la facture payée (liquidation via stub)", as
   assert.equal(status.payoutStatus, "done"); // payout soumis (statut PENDING côté Bitnob)
 });
 
+// ------------------------------------------------- avis client (feedback)
+test("Avis client : facture payée uniquement, un seul avis, visible côté public", async () => {
+  const reference = "feedback-ref-" + Date.now();
+  store.collection("invoices").set(reference, {
+    invoiceId: "inv_feedback_1",
+    reference,
+    description: "Test avis",
+    amountSat: 1000,
+    amountXOF: 5000,
+    merchant: "Boutique Test",
+    merchantPhone: "771234567",
+    provider: "wave",
+    status: "pending",
+    payoutStatus: null,
+    createdAt: new Date().toISOString(),
+  });
+
+  // 1) Facture non payée -> 400 (on ne note pas avant d'avoir payé).
+  const tooEarly = await jsonFetch(`/api/invoices/${reference}/feedback`, {
+    method: "POST",
+    body: { rating: 5 },
+  });
+  assert.equal(tooEarly.status, 400);
+
+  // 2) On marque la facture payée via un webhook signé.
+  const payload = JSON.stringify({
+    event: "btc.lightning.received.success",
+    reference,
+    amount: 1000,
+    payment_hash: "ph_feedback",
+  });
+  const webhook = await fetch(base + "/api/webhooks/bitnob", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-bitnob-signature": signBitnob(payload) },
+    body: payload,
+  });
+  assert.equal(webhook.status, 200);
+
+  // 3) Note hors barème -> 400.
+  const badRating = await jsonFetch(`/api/invoices/${reference}/feedback`, {
+    method: "POST",
+    body: { rating: 9 },
+  });
+  assert.equal(badRating.status, 400);
+
+  // 4) Avis valide -> 201, et renvoyé par la vue publique (accusé côté client)
+  //    comme par la vue marchand (normalizeInvoice).
+  const sent = await jsonFetch(`/api/invoices/${reference}/feedback`, {
+    method: "POST",
+    body: { rating: 4, comment: "Rapide et simple" },
+  });
+  assert.equal(sent.status, 201);
+  assert.equal(sent.data.feedback.rating, 4);
+
+  const publicView = await jsonFetch(`/api/invoices/${reference}`);
+  assert.equal(publicView.data.feedback.rating, 4);
+  assert.equal(publicView.data.feedback.comment, "Rapide et simple");
+
+  // 5) Deuxième avis sur la même facture -> 409 (l'avis d'origine est conservé).
+  const duplicate = await jsonFetch(`/api/invoices/${reference}/feedback`, {
+    method: "POST",
+    body: { rating: 1 },
+  });
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.data.feedback.rating, 4);
+});
+
 // ------------------------------------------------- dédup webhook (event_id)
 test("Dédup webhook : le même event_id n'est traité qu'une fois", async () => {
   const reference = "dedup-ref-" + Date.now();
